@@ -1,0 +1,17 @@
+[
+  {
+    "event": "Stop",
+    "type": "prompt",
+    "matcher": {
+      "any_tool_used": ["Edit", "Write", "Bash", "mcp__qdrant-memory__store_memory"]
+    },
+    "prompt": "Review this conversation turn and determine if there's anything worth remembering for future context. Only store MEANINGFUL information such as:\n\n- User preferences or patterns (e.g., coding style, preferred tools, naming conventions)\n- Project-specific facts (architecture decisions, important file locations, API endpoints)\n- Technical decisions made (why something was done a certain way)\n- Recurring problems and their solutions\n- User's development environment details\n- Important code patterns or abstractions in their codebase\n\nDO NOT store:\n- Routine file reads or exploration\n- Trivial changes or fixes\n- Generic conversation\n- Information that's already stored\n\nIf there IS something worth remembering, use the `store_memory` tool with:\n- Concise, factual content (not conversational)\n- Relevant tags like ['preference', 'user'], ['architecture', 'project'], ['pattern', 'code'], ['decision'], ['environment']\n- Source: 'conversation'\n\nIf nothing is worth storing, do NOT call store_memory - just acknowledge this silently and continue.\n\nBe SELECTIVE. Quality over quantity. Only store 0-2 memories per conversation turn at most.",
+    "stop_after": false
+  },
+  {
+    "event": "SessionStart",
+    "type": "prompt",
+    "prompt": "At the start of this session, search your memory for any relevant context about this user or project. Use `search_memory` with a query related to the current working directory or any context you can infer. This helps maintain continuity across sessions.\n\nDo this silently - don't announce that you're checking memory unless you find something specifically relevant to share.",
+    "stop_after": false
+  }
+]
