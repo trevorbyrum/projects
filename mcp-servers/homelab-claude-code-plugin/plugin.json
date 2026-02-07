@@ -1,0 +1,5 @@
+{
+  "name": "homelab-gateway",
+  "version": "1.0.0",
+  "description": "Homelab MCP Gateway - Docker, PostgreSQL, Qdrant, Neo4j, n8n, Vault, OpenRouter"
+}

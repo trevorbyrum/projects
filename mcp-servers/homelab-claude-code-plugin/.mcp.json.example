@@ -1,0 +1,6 @@
+{
+  "homelab": {
+    "type": "http",
+    "url": "https://mcp.your-domain.com/"
+  }
+}
