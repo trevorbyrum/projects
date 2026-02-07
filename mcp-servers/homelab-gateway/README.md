@@ -1,146 +1,100 @@
 # Homelab MCP Gateway
 
-A self-hosted MCP (Model Context Protocol) server that exposes your homelab services to Claude.ai **without OAuth authentication**.
+A Model Context Protocol (MCP) gateway for homelab services, providing a unified interface for AI assistants to interact with your infrastructure.
 
-## The Problem We Solved
+## Features
 
-Connecting a self-hosted MCP server to Claude.ai's web interface is tricky because Claude.ai will trigger OAuth discovery if certain conditions aren't met. After extensive debugging, we identified **4 critical requirements**:
+- **List/Call Pattern**: Reduces 60+ individual tools to 22 (2 per category)
+- **Local Embeddings**: Uses Xenova/transformers with all-MiniLM-L6-v2 (384 dimensions, no API key needed)
+- **Headless Browser**: Playwright Chromium for web automation
+- **Docker Integration**: Full container management via socket proxy
 
-### 1. Cloudflare Bot Fight Mode Must Be Disabled
+## Tool Categories
 
-Cloudflare's "Super Bot Fight Mode" blocks Claude.ai's MCP client. You must create a security rule to bypass it:
+| Category | Tools | Description |
+|----------|-------|-------------|
+| `gateway` | 2 | Health checks, configuration |
+| `n8n` | 10 | Workflow automation |
+| `memory` | 7 | Qdrant vector storage |
+| `graph` | 8 | Neo4j knowledge graph |
+| `pg` | 5 | PostgreSQL database |
+| `vector` | 7 | pgvector embeddings |
+| `docker` | 14 | Container management |
+| `vault` | 4 | HashiCorp Vault secrets |
+| `ai` | 5 | OpenRouter LLM access |
+| `github` | 14 | GitHub API |
+| `browser` | 13 | Playwright automation |
 
-**Cloudflare Dashboard → Security → WAF → Custom Rules**
+## Usage Pattern
 
-Create a rule:
-- **Name**: `Allow MCP Subdomain`
-- **Expression**: `(http.host eq "mcp.yourdomain.com")`
-- **Action**: `Skip` → Check all: WAF, Rate Limiting, Bot Fight Mode, etc.
+Each category exposes two tools:
+- `{category}_list` - Shows available sub-tools and their parameters
+- `{category}_call` - Executes a sub-tool with parameters
 
-### 2. GET Request Must Return 200 OK
+```json
+// List available memory tools
+{ "tool": "memory_list" }
 
-Claude.ai sends a GET request before POST. If it doesn't get 200 OK, it triggers OAuth.
-
-```typescript
-// Handle GET request - required for Claude.ai authless
-if (req.method === "GET") {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.write(": connected\n\n");
-  return;
+// Store a memory
+{ 
+  "tool": "memory_call", 
+  "params": {
+    "tool": "store",
+    "params": { "content": "Important note", "category": "notes" }
+  }
 }
 ```
-
-### 3. WWW-Authenticate Header Must Be Stripped
-
-If your reverse proxy returns `WWW-Authenticate` headers, Claude.ai interprets this as requiring auth.
-
-**Traefik middleware** (via Docker labels):
-```yaml
-- "traefik.http.middlewares.mcp-no-auth.headers.customResponseHeaders.WWW-Authenticate="
-- "traefik.http.routers.mcp.middlewares=mcp-no-auth"
-```
-
-### 4. SDK Accept Header Patch
-
-The MCP SDK rejects `*/*` Accept headers (which Claude.ai sends). Apply this patch after `npm install`:
-
-```javascript
-// patch-sdk.cjs - see file for full implementation
-// Patches the SDK to accept */* Accept header from Claude.ai
-```
-
-## Adding Your Own Tools
-
-Tools are registered in `src/tools/`. See `src/tools/example.ts` for the format:
-
-```typescript
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-
-export function registerMyTools(server: McpServer) {
-  server.tool(
-    "tool_name",
-    "Description of what this tool does",
-    {
-      param1: z.string().describe("Parameter description"),
-      param2: z.number().optional().describe("Optional parameter"),
-    },
-    async ({ param1, param2 }) => {
-      // Your tool logic here
-      const result = { /* ... */ };
-      
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
-}
-```
-
-Then import and register in `src/index.ts`:
-
-```typescript
-import { registerMyTools } from "./tools/my-tools.js";
-
-// In createMcpServer():
-registerMyTools(server);
-```
-
-## Environment Variables
-
-Create a `.env` file with your service configurations. See `.env.example` for the format.
-
-**Never commit your `.env` file or hardcode secrets in source files.**
 
 ## Deployment
 
-### Docker Build
+### Docker
 
 ```bash
 docker build -t homelab-mcp-gateway .
-```
 
-### Docker Run with Traefik
-
-```bash
 docker run -d \
   --name homelab-mcp-gateway \
   --network traefik_proxy \
-  --env-file .env \
+  -e N8N_API_URL=https://n8n.your-domain.com \
+  -e N8N_API_KEY=xxx \
+  -e QDRANT_URL=http://Qdrant:6333 \
+  -e NEO4J_URL=bolt://Neo4j:7687 \
+  -e NEO4J_USER=neo4j \
+  -e NEO4J_PASSWORD=xxx \
   -l "traefik.enable=true" \
-  -l "traefik.http.routers.mcp.rule=Host(\`mcp.yourdomain.com\`)" \
-  -l "traefik.http.routers.mcp.entrypoints=http" \
+  -l "traefik.http.routers.mcp.rule=Host(\`mcp.your-domain.com\`)" \
   -l "traefik.http.services.mcp.loadbalancer.server.port=3500" \
-  -l "traefik.http.middlewares.mcp-no-auth.headers.customResponseHeaders.WWW-Authenticate=" \
-  -l "traefik.http.routers.mcp.middlewares=mcp-no-auth" \
   homelab-mcp-gateway
 ```
 
-## Connecting to Claude.ai
+### Environment Variables
 
-1. Go to Claude.ai Settings → Connectors
-2. Add new connector with URL: `https://mcp.yourdomain.com/`
-3. It should connect without triggering OAuth
+See `.env.example` for all configuration options.
 
-If OAuth is triggered, check:
-- Cloudflare security rules are properly configured
-- Server responds to GET with 200 OK
-- No WWW-Authenticate headers in response
+## Architecture
 
-## Troubleshooting
+```
+Claude.ai / Claude Mobile
+       ↓
+mcp.your-domain.com
+       ↓
+Cloudflare Tunnel
+       ↓
+Traefik
+       ↓
+MCP Gateway (this container)
+       ↓
+┌─────────────────────────────────────┐
+│         Docker Network              │
+├─────────────────────────────────────┤
+│ Qdrant   Neo4j   n8n   pgvector   │
+│ Vault    Docker Socket Proxy       │
+└─────────────────────────────────────┘
+```
 
-### OAuth Keeps Triggering
+## SDK Patch
 
-1. Check Cloudflare security rules - Bot Fight Mode must be skipped
-2. Verify GET returns 200: `curl -I https://mcp.yourdomain.com/`
-3. Check for auth headers: `curl -I https://mcp.yourdomain.com/ | grep -i auth`
-
-### Connection Refused
-
-1. Check container is running: `docker ps`
-2. Check logs: `docker logs homelab-mcp-gateway`
-3. Verify Traefik routing: `curl http://localhost:3500/health`
+The `patch-sdk.cjs` script fixes Accept header handling in the MCP SDK to work with Claude.ai's connector.
 
 ## License
 

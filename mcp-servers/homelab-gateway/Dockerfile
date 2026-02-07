@@ -1,4 +1,4 @@
-FROM node:20-slim
+FROM mcr.microsoft.com/playwright:v1.40.0-jammy
 
 WORKDIR /app
 
@@ -7,6 +7,9 @@ COPY package*.json ./
 
 # Install dependencies
 RUN npm install
+
+# Install playwright browsers (chromium only)
+RUN npx playwright install chromium
 
 # Copy patch script and apply
 COPY patch-sdk.cjs ./
