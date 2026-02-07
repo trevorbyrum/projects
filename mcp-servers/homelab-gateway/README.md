@@ -1,13 +1,6 @@
 # Homelab MCP Gateway
 
-A self-hosted MCP (Model Context Protocol) server that exposes homelab services to Claude.ai **without OAuth authentication**.
-
-## Features
-
-- **n8n Integration**: List, create, execute, and manage n8n workflows
-- **Qdrant Memory**: Semantic memory storage with automatic embeddings (all-MiniLM-L6-v2)
-- **Neo4j Graph**: Knowledge graph operations with Cypher query support
-- **Gateway Status**: Health checks for all connected services
+A self-hosted MCP (Model Context Protocol) server that exposes your homelab services to Claude.ai **without OAuth authentication**.
 
 ## The Problem We Solved
 
@@ -53,53 +46,52 @@ If your reverse proxy returns `WWW-Authenticate` headers, Claude.ai interprets t
 The MCP SDK rejects `*/*` Accept headers (which Claude.ai sends). Apply this patch after `npm install`:
 
 ```javascript
-// patch-sdk.cjs
-const fs = require('fs');
-const FILES = [
-  "node_modules/@modelcontextprotocol/sdk/dist/cjs/server/webStandardStreamableHttp.js",
-  "node_modules/@modelcontextprotocol/sdk/dist/esm/server/webStandardStreamableHttp.js"
-];
+// patch-sdk.cjs - see file for full implementation
+// Patches the SDK to accept */* Accept header from Claude.ai
+```
 
-for (const FILE of FILES) {
-  let content = fs.readFileSync(FILE, 'utf8');
-  content = content.replace(
-    /if \(!acceptHeader\?\.includes\('application\/json'\) \|\| !acceptHeader\.includes\('text\/event-stream'\)\)/g,
-    "if (acceptHeader !== '*/*' && (!acceptHeader?.includes('application/json') || !acceptHeader.includes('text/event-stream')))"
+## Adding Your Own Tools
+
+Tools are registered in `src/tools/`. See `src/tools/example.ts` for the format:
+
+```typescript
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+
+export function registerMyTools(server: McpServer) {
+  server.tool(
+    "tool_name",
+    "Description of what this tool does",
+    {
+      param1: z.string().describe("Parameter description"),
+      param2: z.number().optional().describe("Optional parameter"),
+    },
+    async ({ param1, param2 }) => {
+      // Your tool logic here
+      const result = { /* ... */ };
+      
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
   );
-  content = content.replace(
-    /if \(!acceptHeader\?\.includes\('text\/event-stream'\)\)/g,
-    "if (acceptHeader !== '*/*' && !acceptHeader?.includes('text/event-stream'))"
-  );
-  fs.writeFileSync(FILE, content);
 }
 ```
 
-## Architecture
+Then import and register in `src/index.ts`:
 
-```
-Claude.ai Web ──► Cloudflare Tunnel ──► Traefik ──► MCP Gateway ──┬──► n8n
-                                                                   ├──► Qdrant  
-                                                                   └──► Neo4j
+```typescript
+import { registerMyTools } from "./tools/my-tools.js";
+
+// In createMcpServer():
+registerMyTools(server);
 ```
 
 ## Environment Variables
 
-```env
-# Server
-PORT=3500
+Create a `.env` file with your service configurations. See `.env.example` for the format.
 
-# n8n
-N8N_API_URL=https://n8n.yourdomain.com
-N8N_API_KEY=your-n8n-api-key
-
-# Qdrant
-QDRANT_URL=http://qdrant:6333
-
-# Neo4j
-NEO4J_URL=bolt://neo4j:7687
-NEO4J_USER=neo4j
-NEO4J_PASSWORD=your-password
-```
+**Never commit your `.env` file or hardcode secrets in source files.**
 
 ## Deployment
 
@@ -125,47 +117,6 @@ docker run -d \
   homelab-mcp-gateway
 ```
 
-### With HTTPS (Cloudflare Tunnel recommended)
-
-If using Cloudflare Tunnel, point it to your Traefik instance and the tunnel handles TLS termination.
-
-## Available Tools
-
-### Gateway
-- `gateway_status` - Check health of all connected services
-- `gateway_config` - Get gateway configuration
-
-### n8n Workflows
-- `n8n_list_workflows` - List all workflows
-- `n8n_get_workflow` - Get workflow by ID
-- `n8n_create_workflow` - Create new workflow
-- `n8n_update_workflow` - Update existing workflow
-- `n8n_delete_workflow` - Delete workflow
-- `n8n_activate_workflow` - Activate workflow
-- `n8n_deactivate_workflow` - Deactivate workflow
-- `n8n_execute_workflow` - Execute workflow with payload
-- `n8n_get_execution` - Get execution details
-- `n8n_list_executions` - List execution history
-
-### Qdrant Memory
-- `memory_store` - Store content with auto-generated embeddings
-- `memory_search` - Semantic search across memories
-- `memory_list` - List memories with pagination
-- `memory_get` - Get specific memory by ID
-- `memory_update` - Update memory content/metadata
-- `memory_delete` - Delete memory
-- `memory_stats` - Get collection statistics
-
-### Neo4j Graph
-- `graph_create_node` - Create node with label and properties
-- `graph_create_relationship` - Create relationship between nodes
-- `graph_query` - Execute raw Cypher query
-- `graph_find_node` - Find nodes by label/properties
-- `graph_get_neighbors` - Get connected nodes
-- `graph_find_path` - Find shortest path between nodes
-- `graph_delete_node` - Delete node and relationships
-- `graph_update_node` - Update node properties
-
 ## Connecting to Claude.ai
 
 1. Go to Claude.ai Settings → Connectors
@@ -190,12 +141,6 @@ If OAuth is triggered, check:
 1. Check container is running: `docker ps`
 2. Check logs: `docker logs homelab-mcp-gateway`
 3. Verify Traefik routing: `curl http://localhost:3500/health`
-
-### Tools Not Showing
-
-1. Verify successful initialize handshake in logs
-2. Check that all tool modules are imported in index.ts
-3. Ensure services (n8n, Qdrant, Neo4j) are reachable from container
 
 ## License
 

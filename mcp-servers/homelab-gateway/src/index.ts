@@ -2,26 +2,24 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import express from "express";
 
-// Import tool modules
-import { registerN8nTools } from "./tools/n8n.js";
-import { registerMemoryTools } from "./tools/memory.js";
-import { registerGraphTools } from "./tools/graph.js";
+// Import tool modules - add your own here
 import { registerGatewayTools } from "./tools/gateway.js";
+import { registerExampleTools } from "./tools/example.js";
+// import { registerMyTools } from "./tools/my-tools.js";
 
 const PORT = parseInt(process.env.PORT || "3500");
 
 // Factory function to create a new MCP server with all tools registered
 function createMcpServer(): McpServer {
   const server = new McpServer({
-    name: "Trevor's Homelab Gateway",
+    name: "Homelab MCP Gateway",
     version: "1.0.0",
   });
 
-  // Register all tools
+  // Register your tools here
   registerGatewayTools(server);
-  registerN8nTools(server);
-  registerMemoryTools(server);
-  registerGraphTools(server);
+  registerExampleTools(server);
+  // registerMyTools(server);
 
   return server;
 }
@@ -142,7 +140,6 @@ app.all("/", async (req, res) => {
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
-    service: "homelab-mcp-gateway",
     version: "1.0.0",
     timestamp: new Date().toISOString(),
     activeSessions: sessions.size,
