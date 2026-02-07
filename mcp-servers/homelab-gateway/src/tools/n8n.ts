@@ -1,10 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-const N8N_API_URL = process.env.N8N_API_URL || "https://n8n.8-bit-byrum.com";
+const N8N_API_URL = process.env.N8N_API_URL || "";
 const N8N_API_KEY = process.env.N8N_API_KEY || "";
 
 async function n8nFetch(endpoint: string, options: RequestInit = {}) {
+  if (!N8N_API_URL) {
+    throw new Error("N8N_API_URL not configured");
+  }
+  if (!N8N_API_KEY) {
+    throw new Error("N8N_API_KEY not configured");
+  }
+  
   const url = `${N8N_API_URL}/api/v1${endpoint}`;
   const response = await fetch(url, {
     ...options,

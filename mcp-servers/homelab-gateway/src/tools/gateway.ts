@@ -1,11 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-const N8N_API_URL = process.env.N8N_API_URL || "https://n8n.8-bit-byrum.com";
-const QDRANT_URL = process.env.QDRANT_URL || "http://Qdrant:6333";
-const NEO4J_URL = process.env.NEO4J_URL || "bolt://Neo4j:7687";
+const N8N_API_URL = process.env.N8N_API_URL || "";
+const QDRANT_URL = process.env.QDRANT_URL || "http://localhost:6333";
+const NEO4J_URL = process.env.NEO4J_URL || "bolt://localhost:7687";
 
 async function checkService(name: string, url: string): Promise<{ status: string; latency?: number }> {
+  if (!url) {
+    return { status: "not_configured" };
+  }
   const start = Date.now();
   try {
     const controller = new AbortController();
@@ -53,9 +56,9 @@ export function registerGatewayTools(server: McpServer) {
           timestamp: new Date().toISOString(),
         },
         services: {
-          n8n: { url: N8N_API_URL, ...n8n },
-          qdrant: { url: QDRANT_URL, ...qdrant },
-          neo4j: { url: NEO4J_URL, ...neo4j },
+          n8n: { configured: !!N8N_API_URL, ...n8n },
+          qdrant: { configured: !!QDRANT_URL, ...qdrant },
+          neo4j: { configured: !!NEO4J_URL, ...neo4j },
         },
       };
 
@@ -68,14 +71,14 @@ export function registerGatewayTools(server: McpServer) {
   // Gateway config - get environment config (read-only for security)
   server.tool(
     "gateway_config",
-    "Get gateway configuration (service URLs, not secrets)",
+    "Get gateway configuration (shows which services are configured, not URLs)",
     {},
     async () => {
       const config = {
         services: {
-          n8n: { url: N8N_API_URL, configured: !!process.env.N8N_API_KEY },
-          qdrant: { url: QDRANT_URL },
-          neo4j: { url: NEO4J_URL, user: process.env.NEO4J_USER || "neo4j" },
+          n8n: { configured: !!process.env.N8N_API_URL && !!process.env.N8N_API_KEY },
+          qdrant: { configured: !!process.env.QDRANT_URL },
+          neo4j: { configured: !!process.env.NEO4J_URL && !!process.env.NEO4J_PASSWORD },
         },
         environment: process.env.NODE_ENV || "development",
       };
