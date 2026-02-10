@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-const N8N_API_URL = process.env.N8N_API_URL || "https://n8n.8-bit-byrum.com";
+const N8N_API_URL = process.env.N8N_API_URL || "http://n8n:5678";
 const N8N_API_KEY = process.env.N8N_API_KEY || "";
 
 async function n8nFetch(endpoint: string, options: RequestInit = {}) {
@@ -94,6 +94,33 @@ const tools: Record<string, { description: string; params: Record<string, string
     params: { execution_id: "The execution ID" },
     handler: async ({ execution_id }) => await n8nFetch(`/executions/${execution_id}`),
   },
+  // ── Credentials ──────────────────────────────────────────
+
+  create_credential: {
+    description: "Create a new n8n credential. Use get_credential_schema first to see required fields for a credential type.",
+    params: { name: "Credential name", type: "Credential type (e.g. httpHeaderAuth, cloudflareApi2, discordWebhookApi, postgresApi)", data: "Credential data as JSON object (fields depend on type)" },
+    handler: async ({ name, type, data }) => {
+      const body = { name, type, data: typeof data === "string" ? JSON.parse(data) : data };
+      return await n8nFetch("/credentials", { method: "POST", body: JSON.stringify(body) });
+    },
+  },
+
+  delete_credential: {
+    description: "Delete an n8n credential by ID",
+    params: { credential_id: "The credential ID to delete" },
+    handler: async ({ credential_id }) => {
+      return await n8nFetch(`/credentials/${credential_id}`, { method: "DELETE" });
+    },
+  },
+
+  get_credential_schema: {
+    description: "Get the schema (required fields) for a credential type. Common types: httpHeaderAuth, httpBasicAuth, httpQueryAuth, cloudflareApi2, discordWebhookApi, postgresApi, mongoDb, redisApi, githubApi, slackApi",
+    params: { type: "Credential type name" },
+    handler: async ({ type }) => {
+      return await n8nFetch(`/credentials/schema/${type}`);
+    },
+  },
+
   list_executions: {
     description: "List workflow execution history",
     params: { workflow_id: "Filter by workflow ID (optional)", status: "Filter by status: success/error/waiting (optional)", limit: "Max number to return" },

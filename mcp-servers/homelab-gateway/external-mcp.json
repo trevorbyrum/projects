@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "context7": {
+      "url": "https://mcp.context7.com/mcp",
+      "description": "Up-to-date documentation for code libraries and frameworks",
+      "enabled": true,
+      "auth": null,
+      "transport": "http"
+    }
+  }
+}

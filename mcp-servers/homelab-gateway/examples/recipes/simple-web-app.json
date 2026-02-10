@@ -1,0 +1,19 @@
+{
+  "name": "simple-web-app",
+  "description": "A simple Nginx-based web application with custom HTML content",
+  "image": "nginx:alpine",
+  "container_name": "my-web-app",
+  "network": "traefik_proxy",
+  "restart_policy": "unless-stopped",
+  "ports": {},
+  "environment": {},
+  "labels": {
+    "traefik.enable": "true",
+    "traefik.http.routers.my-web-app.rule": "Host(`app.your-domain.com`)",
+    "traefik.http.services.my-web-app.loadbalancer.server.port": "80"
+  },
+  "volumes": {
+    "/path/to/html:/usr/share/nginx/html:ro": ""
+  },
+  "notes": "Replace /path/to/html with your actual HTML directory. Traefik labels expose it at app.your-domain.com."
+}

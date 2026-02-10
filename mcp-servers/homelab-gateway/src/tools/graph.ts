@@ -38,12 +38,13 @@ async function runQuery(cypher: string, params: Record<string, any> = {}): Promi
   }
 }
 
-const tools: Record<string, { description: string; params: Record<string, string>; handler: (p: any) => Promise<any> }> = {
+const tools: Record<string, { description: string; params: Record<string, string>; handler: (p: any, extra?: any) => Promise<any> }> = {
   create_node: {
     description: "Create a new node in the knowledge graph",
     params: { label: "Node label (e.g., Concept, Person, Project)", name: "Unique name for the node", properties: "JSON object of additional properties (optional)" },
     handler: async ({ label, name, properties }) => {
-      const props = { name, ...(properties ? (typeof properties === "string" ? JSON.parse(properties) : properties) : {}), created_at: new Date().toISOString() };
+      const now = new Date().toISOString();
+      const props = { name, ...(properties ? (typeof properties === "string" ? JSON.parse(properties) : properties) : {}), created_at: now, recorded_at: now, observations: [] };
       const result = await runQuery(`CREATE (n:${label} $props) RETURN n`, { props });
       return { status: "created", node: result[0]?.n };
     },
@@ -52,7 +53,8 @@ const tools: Record<string, { description: string; params: Record<string, string
     description: "Create a relationship between two nodes",
     params: { from_name: "Source node name", to_name: "Target node name", type: "Relationship type (e.g., KNOWS, CONTAINS)", properties: "JSON object of relationship properties (optional)" },
     handler: async ({ from_name, to_name, type, properties }) => {
-      const props = { ...(properties ? (typeof properties === "string" ? JSON.parse(properties) : properties) : {}), created_at: new Date().toISOString() };
+      const now = new Date().toISOString();
+      const props = { ...(properties ? (typeof properties === "string" ? JSON.parse(properties) : properties) : {}), created_at: now, recorded_at: now };
       const cypher = `MATCH (a {name: $from_name}), (b {name: $to_name}) CREATE (a)-[r:${type} $props]->(b) RETURN a.name as from, type(r) as relationship, b.name as to`;
       const result = await runQuery(cypher, { from_name, to_name, props });
       if (result.length === 0) return { status: "error", message: "One or both nodes not found" };
@@ -133,13 +135,83 @@ const tools: Record<string, { description: string; params: Record<string, string
     description: "Update properties of an existing node",
     params: { name: "Name of the node to update", properties: "JSON object of properties to set/update" },
     handler: async ({ name, properties }) => {
-      const props = { ...(typeof properties === "string" ? JSON.parse(properties) : properties), updated_at: new Date().toISOString() };
+      const now = new Date().toISOString();
+      const props = { ...(typeof properties === "string" ? JSON.parse(properties) : properties), updated_at: now, recorded_at: now };
       const result = await runQuery("MATCH (n {name: $name}) SET n += $props RETURN n", { name, props });
       if (result.length === 0) return { status: "not_found", name };
       return { status: "updated", node: result[0].n };
     },
   },
+  add_observation: {
+    description: "Append a timestamped observation to a node's observations array",
+    params: { name: "Node name to add observation to", observation: "The observation text to record" },
+    handler: async ({ name, observation }) => {
+      const now = new Date().toISOString();
+      const date = now.split("T")[0]; // YYYY-MM-DD
+      const formatted = `${date}: ${observation}`;
+      const result = await runQuery(
+        "MATCH (n {name: $name}) SET n.observations = COALESCE(n.observations, []) + $observation, n.updated_at = $updated_at RETURN n",
+        { name, observation: formatted, updated_at: now }
+      );
+      if (result.length === 0) return { status: "not_found", name };
+      return { status: "observation_added", node: result[0].n, observation: formatted };
+    },
+  },
 };
+
+const GRAPH_CALL_DESCRIPTION = `Knowledge graph for structural relationships between projects, infrastructure, people, and events. Neo4j captures what connects to what — dependencies, overlap, progression, and causation. Qdrant stores the rich narrative; Neo4j stores the structure. They cross-reference via entity name tags in Qdrant payloads — search Qdrant by entity name to find the narrative for any Neo4j node.
+
+When to write: When conversation reveals relationships between entities. When writing to both stores, store Qdrant first (for the narrative), then create/update Neo4j nodes and relationships.
+
+Always search first. If an entity exists, append to its observations rather than creating a duplicate. Match by name (case-insensitive).
+
+Read-side routing: Search Neo4j for structural queries — "what depends on X", "what's connected to Y", "what's blocking Z", "what overlaps between A and B". If the query is fuzzy or narrative ("what did we discuss about...", "why did we decide..."), search Qdrant instead. If you need the full picture, search Qdrant first, then traverse Neo4j from the entity names found.
+
+Naming convention: Use consistent casing per label.
+- Projects: PascalCase (PhysicianUX, FenceQuote)
+- Technologies/libraries: as commonly written (n8n, Neo4j, pgvector, SwiftUI)
+- People: full name (Jane Doe)
+- Events: short descriptive phrase (gpu-failure-jan-2025, chose-qdrant-over-weaviate)
+
+Node labels (lowercase): project, component, technology, person, event, library
+
+Node properties:
+- name — required, unique per label
+- type — subtype within label:
+    event: decision | milestone | blocker | discovery
+    component: workflow | module | feature | endpoint
+    technology: container | service | hardware | api | platform
+    library: sdk | framework | package
+- status — discussion | planned | in_progress | built | abandoned (update in place)
+- observations — array of string facts, append only via add_observation sub-tool. Gateway auto-timestamps each as: "YYYY-MM-DD: fact here"
+- created_at — auto-injected by gateway
+- occurred_at — when it happened in real world (set manually if different from created_at)
+
+Event node vs observation — the reification test:
+- If a fact describes ONE entity and doesn't connect to anything else → append as an observation. Examples: "GPU has 48GB VRAM", "n8n is on version 1.72"
+- If a fact connects MULTIPLE entities or causes downstream effects → create an event node with relationships. Examples: "GPU failure" (BLOCKED_BY→Ollama, TRIGGERED→workaround), "Chose Qdrant over Weaviate" (DECIDED_FOR→Qdrant, DECIDED_AGAINST→Weaviate)
+- Test: "Does this fact need relationships to other nodes to be meaningful?" Yes → event. No → observation.
+
+Relationship types (UPPER_SNAKE_CASE):
+- USES — project→technology, project→library (actively using it)
+- REQUIRES — project→technology (needs but may not have yet, or resource contention)
+- DEPENDS_ON — component→technology, library→library (would break without)
+- PART_OF — component→project, component→component
+- DECIDED_FOR / DECIDED_AGAINST — event(decision)→technology, component, or library
+- INFORMED_BY — event(decision)→event or component (what influenced the decision)
+- BLOCKED_BY — project or component→event(blocker)
+- TRIGGERED — event→event (causation)
+- PRECEDED — event→event (temporal sequence without causation)
+- COLLABORATES_WITH — person→project (role property: lead | manager | contributor)
+- REPLACED — event(decision)→event(decision), technology→technology
+
+Relationship properties: since, until, role, reason, recorded_at where meaningful. Gateway auto-injects recorded_at on relationship creates.
+
+Pattern: Search → Create/Update → Connect. Every new entity needs at least one relationship. Use depth 2+ when searching to discover context through the graph.
+
+When Neo4j only: Structural changes with no significant narrative context (simple new relationship between existing nodes, status update).
+
+Note: The gateway auto-injects recorded_at on every write. You do not need to include timestamps in your tool calls.`;
 
 export function registerGraphTools(server: McpServer) {
   server.tool(
@@ -158,18 +230,18 @@ export function registerGraphTools(server: McpServer) {
 
   server.tool(
     "graph_call",
-    "Execute a Neo4j graph tool. Use graph_list to see available tools.",
+    GRAPH_CALL_DESCRIPTION,
     {
       tool: z.string().describe("Tool name from graph_list"),
       params: z.record(z.any()).optional().describe("Tool parameters as object"),
     },
-    async ({ tool, params }) => {
+    async ({ tool, params }, extra) => {
       const toolDef = tools[tool];
       if (!toolDef) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown tool: ${tool}`, available: Object.keys(tools) }) }] };
       }
       try {
-        const result = await toolDef.handler(params || {});
+        const result = await toolDef.handler(params || {}, extra);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (error: any) {
         return { content: [{ type: "text", text: JSON.stringify({ error: error.message }) }], isError: true };

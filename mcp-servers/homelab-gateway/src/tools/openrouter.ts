@@ -15,7 +15,7 @@ async function openrouterRequest(endpoint: string, options: RequestInit = {}): P
     headers: {
       "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
       "Content-Type": "application/json",
-      "HTTP-Referer": "https://mcp.8-bit-byrum.com",
+      "HTTP-Referer": "https://mcp.your-domain.com",
       "X-Title": "Homelab MCP Gateway",
       ...options.headers,
     },
@@ -35,11 +35,11 @@ const tools: Record<string, { description: string; params: Record<string, string
     handler: async ({ filter }) => {
       const result = await openrouterRequest("/models");
       let models = result.data || [];
-      
+
       if (filter) {
         const lowerFilter = filter.toLowerCase();
-        models = models.filter((m: any) => 
-          m.id.toLowerCase().includes(lowerFilter) || 
+        models = models.filter((m: any) =>
+          m.id.toLowerCase().includes(lowerFilter) ||
           m.name?.toLowerCase().includes(lowerFilter)
         );
       }
@@ -55,8 +55,8 @@ const tools: Record<string, { description: string; params: Record<string, string
   },
   chat: {
     description: "Send a chat completion request to any model via OpenRouter",
-    params: { 
-      model: "Model ID (e.g., 'openai/gpt-4o', 'anthropic/claude-3.5-sonnet')", 
+    params: {
+      model: "Model ID (e.g., 'openai/gpt-4o', 'anthropic/claude-3.5-sonnet')",
       messages: "JSON array of {role, content} messages",
       temperature: "Sampling temperature 0-2 (optional)",
       max_tokens: "Max tokens to generate (optional)"
@@ -81,8 +81,8 @@ const tools: Record<string, { description: string; params: Record<string, string
   },
   second_opinion: {
     description: "Get a second opinion on a question or code from a different AI model",
-    params: { 
-      model: "Model to consult (default: gpt-4o)", 
+    params: {
+      model: "Model to consult (default: gpt-4o)",
       question: "The question or topic",
       context: "Additional context like code snippets (optional)"
     },
@@ -117,7 +117,7 @@ const tools: Record<string, { description: string; params: Record<string, string
         })
       );
 
-      const comparison = results.map((r, i) => 
+      const comparison = results.map((r, i) =>
         r.status === "fulfilled" ? r.value : { model: modelList[i], error: (r.reason as any)?.message || "Failed" }
       );
       return { prompt, comparisons: comparison };

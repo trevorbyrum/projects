@@ -1,0 +1,129 @@
+{
+  "name": "[Sub] Teardown Component",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Determine teardown action based on component type\nconst type = $input.item.json.component_type;\nconst id = $input.item.json.component_id;\nconst name = $input.item.json.component_name;\n\nreturn {\n  type,\n  id,\n  name,\n  action: (() => {\n    switch (type) {\n      case 'dify_app': return { tool: 'dify_call', sub_tool: 'delete_app', params: { app_id: id } };\n      case 'n8n_workflow': return { tool: 'n8n_call', sub_tool: 'delete_workflow', params: { workflow_id: id } };\n      case 'pg_table': return { tool: 'pg_call', sub_tool: 'run_query', params: { query: 'DROP TABLE IF EXISTS ' + name } };\n      case 'knowledge_base': return { tool: 'dify_call', sub_tool: 'delete_dataset', params: { dataset_id: id } };\n      case 'secret': return { tool: 'vault_call', sub_tool: 'delete_secret', params: { path: name } };\n      default: return null;\n    }\n  })()\n};"
+      },
+      "id": "plan-teardown",
+      "name": "Plan Teardown",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            { "id": "has-action", "leftValue": "={{ $json.action }}", "rightValue": "", "operator": { "type": "string", "operation": "isNotEmpty" } }
+          ]
+        }
+      },
+      "id": "has-action",
+      "name": "Has Action?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: $json.action.tool, arguments: { tool: $json.action.sub_tool, params: $json.action.params } } }) }}"
+      },
+      "id": "execute-teardown",
+      "name": "Execute Teardown",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, -60],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'memory_call', arguments: { tool: 'store_memory', params: { content: 'Torn down ' + $('Plan Teardown').item.json.type + ' component: ' + $('Plan Teardown').item.json.name + ' (id: ' + $('Plan Teardown').item.json.id + ')', metadata: { type: 'teardown', component: $('Plan Teardown').item.json.type, blueprint: $('Start').item.json.blueprint_name } } } } }) }}"
+      },
+      "id": "log-teardown",
+      "name": "Log Teardown",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -60],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "torn_down" },
+            { "name": "component", "value": "={{ $('Plan Teardown').item.json.type }}" },
+            { "name": "component_id", "value": "={{ $('Plan Teardown').item.json.id }}" }
+          ]
+        }
+      },
+      "id": "result-ok",
+      "name": "Return Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1100, -60]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "skip" },
+            { "name": "component", "value": "={{ $('Plan Teardown').item.json.type }}" },
+            { "name": "details", "value": "No teardown action for this component type" }
+          ]
+        }
+      },
+      "id": "result-skip",
+      "name": "Return Skip",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [660, 120]
+    }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Plan Teardown", "type": "main", "index": 0 }]] },
+    "Plan Teardown": { "main": [[{ "node": "Has Action?", "type": "main", "index": 0 }]] },
+    "Has Action?": {
+      "main": [
+        [{ "node": "Execute Teardown", "type": "main", "index": 0 }],
+        [{ "node": "Return Skip", "type": "main", "index": 0 }]
+      ]
+    },
+    "Execute Teardown": { "main": [[{ "node": "Log Teardown", "type": "main", "index": 0 }]] },
+    "Log Teardown": { "main": [[{ "node": "Return Success", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "sub-workflow" }]
+}

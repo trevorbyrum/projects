@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment (secrets)
+.env
+.env.bak
+.env.backup*
+
+# Backups with secrets
+*.backup*
+
+# Lock file (regenerated on install)
+package-lock.json
+
+# OS
+.DS_Store

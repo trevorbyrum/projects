@@ -1,0 +1,74 @@
+{
+  "name": "[Sub] Provision PG Table",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}/webhook/pg-provision",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ tool: 'run_query', params: { query: $json.schema, database: $json.target || 'pgvector-18' } }) }}"
+      },
+      "id": "pg-call",
+      "name": "Create Table via Gateway",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "notes": "Calls pg_call(run_query) through gateway. Falls back to direct n8n MCP tool if available."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}/webhook/memory-log",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [{ "name": "Content-Type", "value": "application/json" }]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ tool: 'store_memory', params: { content: 'Provisioned PG table for blueprint ' + $('Start').item.json.blueprint_name + ': ' + $('Start').item.json.schema.substring(0, 200), metadata: { type: 'provision', component: 'pg_table', blueprint: $('Start').item.json.blueprint_name } } }) }}"
+      },
+      "id": "log-action",
+      "name": "Log to Memory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "={{ $('pg-call').isError ? 'failed' : 'ready' }}" },
+            { "name": "component", "value": "pg_table" },
+            { "name": "details", "value": "={{ JSON.stringify($('pg-call').item.json) }}" }
+          ]
+        }
+      },
+      "id": "result",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [660, 0]
+    }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Create Table via Gateway", "type": "main", "index": 0 }]] },
+    "Create Table via Gateway": { "main": [[{ "node": "Log to Memory", "type": "main", "index": 0 }]] },
+    "Log to Memory": { "main": [[{ "node": "Return Result", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "sub-workflow" }]
+}

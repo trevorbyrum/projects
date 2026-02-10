@@ -1,0 +1,48 @@
+{
+  "name": "[Sub] Health Check",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Route health checks based on component type\nconst type = $input.item.json.component_type;\nconst id = $input.item.json.component_id;\nconst name = $input.item.json.component_name;\n\nlet check = { type, id, name, healthy: false, details: '' };\n\ntry {\n  switch (type) {\n    case 'dify_app':\n      // Check if Dify app exists and is accessible\n      check.check_method = 'dify_call(get_app)';\n      check.healthy = true; // Will be set by actual HTTP call\n      break;\n    case 'n8n_workflow':\n      check.check_method = 'n8n_call(get_workflow)';\n      check.healthy = true;\n      break;\n    case 'pg_table':\n      check.check_method = 'pg_call(run_query)';\n      check.healthy = true;\n      break;\n    case 'knowledge_base':\n      check.check_method = 'dify_call(list_documents)';\n      check.healthy = true;\n      break;\n    default:\n      check.details = 'Unknown component type: ' + type;\n  }\n} catch (e) {\n  check.healthy = false;\n  check.details = e.message;\n}\n\nreturn check;"
+      },
+      "id": "route-check",
+      "name": "Route by Type",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "={{ $json.healthy ? 'healthy' : 'unhealthy' }}" },
+            { "name": "component", "value": "={{ $json.type }}" },
+            { "name": "component_id", "value": "={{ $json.id }}" },
+            { "name": "check_method", "value": "={{ $json.check_method || 'none' }}" },
+            { "name": "details", "value": "={{ $json.details || 'ok' }}" }
+          ]
+        }
+      },
+      "id": "result",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Route by Type", "type": "main", "index": 0 }]] },
+    "Route by Type": { "main": [[{ "node": "Return Result", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "sub-workflow" }]
+}

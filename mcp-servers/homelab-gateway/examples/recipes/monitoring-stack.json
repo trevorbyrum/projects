@@ -1,0 +1,19 @@
+{
+  "name": "monitoring-stack",
+  "description": "Uptime Kuma for service monitoring with a web dashboard",
+  "image": "louislam/uptime-kuma:1",
+  "container_name": "my-uptime-kuma",
+  "network": "traefik_proxy",
+  "restart_policy": "unless-stopped",
+  "ports": {},
+  "environment": {},
+  "labels": {
+    "traefik.enable": "true",
+    "traefik.http.routers.uptime.rule": "Host(`uptime.your-domain.com`)",
+    "traefik.http.services.uptime.loadbalancer.server.port": "3001"
+  },
+  "volumes": {
+    "uptime-kuma-data:/app/data": ""
+  },
+  "notes": "Uptime Kuma dashboard accessible at uptime.your-domain.com. Data persisted in a named volume. Set up monitors through the web UI after first deploy."
+}

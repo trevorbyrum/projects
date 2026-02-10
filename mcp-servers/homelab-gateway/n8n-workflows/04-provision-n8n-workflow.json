@@ -1,0 +1,98 @@
+{
+  "name": "[Sub] Provision n8n Workflow",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_API_URL }}/api/v1/workflows",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-N8N-API-KEY", "value": "={{ $env.N8N_API_KEY }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ name: $json.name, nodes: $json.nodes || [], connections: $json.connections || {}, settings: $json.settings || { executionOrder: 'v1' } }) }}"
+      },
+      "id": "create-wf",
+      "name": "Create Workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            { "id": "check-activate", "leftValue": "={{ $('Start').item.json.activate }}", "rightValue": "true", "operator": { "type": "string", "operation": "equals" } }
+          ]
+        }
+      },
+      "id": "should-activate",
+      "name": "Should Activate?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_API_URL }}/api/v1/workflows/{{ $('Create Workflow').item.json.id }}/activate",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-N8N-API-KEY", "value": "={{ $env.N8N_API_KEY }}" }
+          ]
+        }
+      },
+      "id": "activate-wf",
+      "name": "Activate Workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, -60]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "ready" },
+            { "name": "component", "value": "n8n_workflow" },
+            { "name": "workflow_id", "value": "={{ $('Create Workflow').item.json.id }}" },
+            { "name": "workflow_name", "value": "={{ $('Start').item.json.name }}" },
+            { "name": "activated", "value": "={{ $('Start').item.json.activate === 'true' || $('Start').item.json.activate === true ? 'yes' : 'no' }}" }
+          ]
+        }
+      },
+      "id": "result",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [880, 0]
+    }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Create Workflow", "type": "main", "index": 0 }]] },
+    "Create Workflow": { "main": [[{ "node": "Should Activate?", "type": "main", "index": 0 }]] },
+    "Should Activate?": {
+      "main": [
+        [{ "node": "Activate Workflow", "type": "main", "index": 0 }],
+        [{ "node": "Return Result", "type": "main", "index": 0 }]
+      ]
+    },
+    "Activate Workflow": { "main": [[{ "node": "Return Result", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "sub-workflow" }]
+}

@@ -1,0 +1,139 @@
+{
+  "name": "[Sub] Provision Dify App",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            { "id": "check-name", "leftValue": "={{ $json.name }}", "rightValue": "", "operator": { "type": "string", "operation": "isNotEmpty" } },
+            { "id": "check-model", "leftValue": "={{ $json.model }}", "rightValue": "", "operator": { "type": "string", "operation": "isNotEmpty" } }
+          ]
+        }
+      },
+      "id": "validate",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'dify_call', arguments: { tool: 'create_app', params: { name: $('Start').item.json.name, mode: $('Start').item.json.type || 'agent-chat', description: $('Start').item.json.description || '' } } } }) }}"
+      },
+      "id": "create-app",
+      "name": "Create Dify App",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'dify_call', arguments: { tool: 'update_app_config', params: { app_id: $('Create Dify App').item.json.id, config: { pre_prompt: $('Start').item.json.system_prompt || '', model: { provider: 'openrouter', name: $('Start').item.json.model || 'anthropic/claude-sonnet-4', mode: 'chat', completion_params: { temperature: 0.7 } } } } } } }) }}"
+      },
+      "id": "configure-app",
+      "name": "Configure App",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, -60]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'dify_call', arguments: { tool: 'publish_app', params: { app_id: $('Create Dify App').item.json.id } } } }) }}"
+      },
+      "id": "publish-app",
+      "name": "Publish App",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -60]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "ready" },
+            { "name": "component", "value": "dify_app" },
+            { "name": "app_id", "value": "={{ $('Create Dify App').item.json.id }}" },
+            { "name": "app_name", "value": "={{ $('Start').item.json.name }}" }
+          ]
+        }
+      },
+      "id": "result-ok",
+      "name": "Return Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1100, -60]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "failed" },
+            { "name": "component", "value": "dify_app" },
+            { "name": "error", "value": "Missing required fields: name and model" }
+          ]
+        }
+      },
+      "id": "result-fail",
+      "name": "Return Failure",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 120]
+    }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Validate Input", "type": "main", "index": 0 }]] },
+    "Validate Input": {
+      "main": [
+        [{ "node": "Create Dify App", "type": "main", "index": 0 }],
+        [{ "node": "Return Failure", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Dify App": { "main": [[{ "node": "Configure App", "type": "main", "index": 0 }]] },
+    "Configure App": { "main": [[{ "node": "Publish App", "type": "main", "index": 0 }]] },
+    "Publish App": { "main": [[{ "node": "Return Success", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "sub-workflow" }]
+}

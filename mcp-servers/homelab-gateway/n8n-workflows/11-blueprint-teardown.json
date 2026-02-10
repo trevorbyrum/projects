@@ -1,0 +1,124 @@
+{
+  "name": "Blueprint Teardown",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "blueprint-teardown",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "blueprint-teardown"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Read the deployed state from Vault to know what to tear down\nconst bp = $input.item.json.body?.blueprint || $input.item.json.blueprint;\nconst name = $input.item.json.body?.blueprint_name || $input.item.json.blueprint_name;\n\nif (!bp || !name) {\n  throw new Error('Missing blueprint or blueprint_name');\n}\n\nreturn {\n  blueprint_name: name,\n  blueprint: bp,\n  components: Object.entries(bp.components).map(([key, value]) => ({\n    component_key: key,\n    component_config: value\n  }))\n};"
+      },
+      "id": "parse",
+      "name": "Parse Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.VAULT_ADDR }}/v1/{{ $env.VAULT_MOUNT || 'homelab' }}/data/blueprints/{{ $json.blueprint_name }}/state",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Vault-Token", "value": "={{ $env.VAULT_TOKEN }}" }
+          ]
+        }
+      },
+      "id": "get-state",
+      "name": "Get Deployed State",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Build teardown plan from state + blueprint\nconst state = $input.item.json.data?.data || {};\nconst bpName = $('Parse Request').item.json.blueprint_name;\nconst components = state.components || $('Parse Request').item.json.components || [];\n\n// Map to teardown inputs\nconst teardownItems = [];\nfor (const comp of components) {\n  if (comp.component_id || comp.component_key) {\n    teardownItems.push({\n      blueprint_name: bpName,\n      component_type: comp.component || comp.component_key,\n      component_id: comp.component_id || comp.app_id || comp.workflow_id || comp.dataset_id || '',\n      component_name: comp.component_name || comp.name || ''\n    });\n  }\n}\n\nreturn { blueprint_name: bpName, teardown_items: teardownItems, count: teardownItems.length };"
+      },
+      "id": "plan-teardown",
+      "name": "Plan Teardown",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_call', arguments: { tool: 'store_memory', params: { content: 'Tearing down blueprint: ' + $json.blueprint_name + '. Components to remove: ' + $json.count, metadata: { type: 'blueprint-teardown', blueprint: $json.blueprint_name } } } } }) }}"
+      },
+      "id": "log-teardown",
+      "name": "Log Teardown Start",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VAULT_ADDR }}/v1/{{ $env.VAULT_MOUNT || 'homelab' }}/data/blueprints/{{ $('Plan Teardown').item.json.blueprint_name }}/state",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-Vault-Token", "value": "={{ $env.VAULT_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ data: { status: 'torn_down', torn_down_at: new Date().toISOString() } }) }}"
+      },
+      "id": "update-state",
+      "name": "Update State to Torn Down",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, blueprint: $('Plan Teardown').item.json.blueprint_name, status: 'torn_down', components_planned: $('Plan Teardown').item.json.count }) }}"
+      },
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1320, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Parse Request", "type": "main", "index": 0 }]] },
+    "Parse Request": { "main": [[{ "node": "Get Deployed State", "type": "main", "index": 0 }]] },
+    "Get Deployed State": { "main": [[{ "node": "Plan Teardown", "type": "main", "index": 0 }]] },
+    "Plan Teardown": { "main": [[{ "node": "Log Teardown Start", "type": "main", "index": 0 }]] },
+    "Log Teardown Start": { "main": [[{ "node": "Update State to Torn Down", "type": "main", "index": 0 }]] },
+    "Update State to Torn Down": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "deployer" }]
+}

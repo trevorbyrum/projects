@@ -1,0 +1,16 @@
+{
+  "name": "redis-cache",
+  "description": "A Redis instance for caching and message brokering",
+  "image": "redis:7-alpine",
+  "container_name": "my-redis",
+  "network": "traefik_proxy",
+  "restart_policy": "unless-stopped",
+  "ports": {},
+  "environment": {},
+  "labels": {},
+  "volumes": {
+    "redis-data:/data": ""
+  },
+  "command": "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru",
+  "notes": "Runs with AOF persistence and 256MB memory limit. Accessible from other containers on the same network at redis://my-redis:6379."
+}

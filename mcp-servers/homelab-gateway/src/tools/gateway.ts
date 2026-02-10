@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-const N8N_API_URL = process.env.N8N_API_URL || "https://n8n.8-bit-byrum.com";
+const N8N_API_URL = process.env.N8N_API_URL || "http://n8n:5678";
 const QDRANT_URL = process.env.QDRANT_URL || "http://Qdrant:6333";
 const NEO4J_URL = process.env.NEO4J_URL || "bolt://Neo4j:7687";
 
@@ -41,6 +41,36 @@ const tools: Record<string, { description: string; params: Record<string, string
           neo4j: { url: NEO4J_URL, ...neo4j },
         },
       };
+    },
+  },
+  readme: {
+    description: "Get the project CLAUDE.md - architecture, rules, and file map. READ THIS FIRST before making any changes.",
+    params: {},
+    handler: async () => {
+      const fs = await import("fs");
+      try {
+        const content = fs.readFileSync("/app/CLAUDE.md", "utf-8");
+        return { content };
+      } catch {
+        return { error: "CLAUDE.md not found" };
+      }
+    },
+  },
+  read_file: {
+    description: "Read a file from the server filesystem",
+    params: { path: "Absolute path to read" },
+    handler: async ({ path }) => {
+      const fs = await import("fs");
+      return { path, content: fs.readFileSync(path, "utf-8") };
+    },
+  },
+  write_file: {
+    description: "Write a file to the server filesystem",
+    params: { path: "Absolute path", content: "File content" },
+    handler: async ({ path, content }) => {
+      const fs = await import("fs");
+      fs.writeFileSync(path, content, "utf-8");
+      return { status: "written", path, bytes: content.length };
     },
   },
   config: {

@@ -1,0 +1,179 @@
+{
+  "name": "[Sub] Guardrail Check",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'blueprint_call', arguments: { tool: 'check_action_budget', params: { name: $json.agent_name } } } }) }}"
+      },
+      "id": "check-budget",
+      "name": "Check Action Budget",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'blueprint_call', arguments: { tool: 'check_sunset', params: { name: $('Start').item.json.agent_name } } } }) }}"
+      },
+      "id": "check-sunset",
+      "name": "Check Sunset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 200]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse results from both checks\nlet budgetResult, sunsetResult;\ntry {\n  const budgetRaw = $('Check Action Budget').item.json;\n  budgetResult = typeof budgetRaw.result?.content?.[0]?.text === 'string' \n    ? JSON.parse(budgetRaw.result.content[0].text) \n    : budgetRaw;\n} catch { budgetResult = { allowed: true }; }\n\ntry {\n  const sunsetRaw = $('Check Sunset').item.json;\n  sunsetResult = typeof sunsetRaw.result?.content?.[0]?.text === 'string'\n    ? JSON.parse(sunsetRaw.result.content[0].text)\n    : sunsetRaw;\n} catch { sunsetResult = { should_disable: false }; }\n\nconst blocked = !budgetResult.allowed || sunsetResult.should_disable;\nconst reasons = [];\nif (!budgetResult.allowed) reasons.push('Over daily action budget (' + (budgetResult.used_today || '?') + '/' + (budgetResult.budget || '?') + ')');\nif (sunsetResult.should_disable) reasons.push('Inactive too long — auto-sunset triggered');\n\nreturn {\n  agent_name: $('Start').item.json.agent_name,\n  allowed: !blocked,\n  blocked,\n  reasons,\n  budget: budgetResult,\n  sunset: sunsetResult\n};"
+      },
+      "id": "evaluate",
+      "name": "Evaluate Guardrails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 100]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            { "id": "is-blocked", "leftValue": "={{ $json.blocked }}", "rightValue": "true", "operator": { "type": "boolean", "operation": "true" } }
+          ]
+        }
+      },
+      "id": "is-blocked",
+      "name": "Is Blocked?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'blueprint_call', arguments: { tool: 'kill_agent', params: { name: $('Evaluate Guardrails').item.json.agent_name, reason: 'Guardrail triggered: ' + $('Evaluate Guardrails').item.json.reasons.join('; '), confirm: true } } } }) }}"
+      },
+      "id": "kill-agent",
+      "name": "Kill Agent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 40]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "blocked" },
+            { "name": "agent_name", "value": "={{ $('Evaluate Guardrails').item.json.agent_name }}" },
+            { "name": "reasons", "value": "={{ $('Evaluate Guardrails').item.json.reasons.join('; ') }}" }
+          ],
+          "boolean": [{ "name": "allowed", "value": false }]
+        }
+      },
+      "id": "result-blocked",
+      "name": "Return Blocked",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1100, 40]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'blueprint_call', arguments: { tool: 'record_action', params: { name: $('Evaluate Guardrails').item.json.agent_name, action_type: $('Start').item.json.action_type || 'general' } } } }) }}"
+      },
+      "id": "record-action",
+      "name": "Record Action",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "allowed" },
+            { "name": "agent_name", "value": "={{ $('Evaluate Guardrails').item.json.agent_name }}" }
+          ],
+          "boolean": [{ "name": "allowed", "value": true }]
+        }
+      },
+      "id": "result-allowed",
+      "name": "Return Allowed",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1100, 200]
+    }
+  ],
+  "connections": {
+    "Start": {
+      "main": [
+        [
+          { "node": "Check Action Budget", "type": "main", "index": 0 },
+          { "node": "Check Sunset", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Check Action Budget": { "main": [[{ "node": "Evaluate Guardrails", "type": "main", "index": 0 }]] },
+    "Check Sunset": { "main": [[{ "node": "Evaluate Guardrails", "type": "main", "index": 0 }]] },
+    "Evaluate Guardrails": { "main": [[{ "node": "Is Blocked?", "type": "main", "index": 0 }]] },
+    "Is Blocked?": {
+      "main": [
+        [{ "node": "Kill Agent", "type": "main", "index": 0 }],
+        [{ "node": "Record Action", "type": "main", "index": 0 }]
+      ]
+    },
+    "Kill Agent": { "main": [[{ "node": "Return Blocked", "type": "main", "index": 0 }]] },
+    "Record Action": { "main": [[{ "node": "Return Allowed", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "sub-workflow" }, { "name": "guardrails" }]
+}

@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  mcp-gateway:
+    build: .
+    container_name: homelab-mcp-gateway
+    restart: unless-stopped
+    env_file: .env
+    # ================================================================
+    # TRAEFIK LABELS - DO NOT MODIFY
+    # ================================================================
+    # Cloudflare terminates SSL, forwards to Traefik on port 80.
+    # The entrypoint is HTTP. Do NOT add any of these:
+    #   - entrypoints=https    <- WRONG (must be http)
+    #   - tls=true               <- WRONG
+    #   - tls.certresolver        <- WRONG
+    # The 3 labels below are ALL that is needed.
+    # ================================================================
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.mcp-gateway.rule=Host(`mcp.your-domain.com`)"
+      - "traefik.http.services.mcp-gateway.loadbalancer.server.port=3500"
+    networks:
+      - traefik_proxy
+
+networks:
+  traefik_proxy:
+    external: true

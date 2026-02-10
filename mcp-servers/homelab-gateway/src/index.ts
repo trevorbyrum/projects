@@ -14,15 +14,28 @@ import { registerVaultTools } from "./tools/vault.js";
 import { registerOpenrouterTools } from "./tools/openrouter.js";
 import { registerGithubTools } from "./tools/github.js";
 import { registerPlaywrightTools } from "./tools/playwright.js";
+import { registerPrometheusTools } from "./tools/prometheus.js";
+import { registerUptimeKumaTools } from "./tools/uptimekuma.js";
+import { registerRabbitmqTools } from "./tools/rabbitmq.js";
+import { registerExternalTools } from "./tools/external.js";
+import { registerDifyTools } from "./tools/dify.js";
+import { registerOpenhandsTools } from "./tools/openhands.js";
+import { registerTraefikTools } from "./tools/traefik.js";
+import { registerRedisTools } from "./tools/redis.js";
+import { registerMongodbTools } from "./tools/mongodb.js";
+import { registerRecipeTools } from "./tools/recipes.js";
+import { registerBlueprintTools } from "./tools/blueprints.js";
+import { registerProjectTools } from "./tools/projects.js";
 
 const PORT = parseInt(process.env.PORT || "3500");
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
-    name: "Trevor's Homelab Gateway",
+    name: "Homelab MCP Gateway",
     version: "1.0.0",
   });
 
+  // Internal homelab tools
   registerGatewayTools(server);
   registerN8nTools(server);
   registerMemoryTools(server);
@@ -34,6 +47,21 @@ function createMcpServer(): McpServer {
   registerOpenrouterTools(server);
   registerGithubTools(server);
   registerPlaywrightTools(server);
+
+  registerPrometheusTools(server);
+  registerUptimeKumaTools(server);
+  registerRabbitmqTools(server);
+  registerDifyTools(server);
+  registerOpenhandsTools(server);
+  registerTraefikTools(server);
+  registerRedisTools(server);
+  registerMongodbTools(server);
+  registerRecipeTools(server);
+  registerBlueprintTools(server);
+  registerProjectTools(server);
+
+  // External MCP proxies (loaded from config)
+  registerExternalTools(server);
 
   return server;
 }

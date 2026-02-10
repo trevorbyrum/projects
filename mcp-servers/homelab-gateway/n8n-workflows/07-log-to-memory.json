@@ -1,0 +1,55 @@
+{
+  "name": "[Sub] Log to Memory",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_call', arguments: { tool: 'store_memory', params: { content: $json.content, metadata: Object.assign({ type: 'blueprint-system' }, $json.metadata || {}) } } } }) }}"
+      },
+      "id": "store-memory",
+      "name": "Store in Qdrant",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "={{ $('store-memory').isError ? 'failed' : 'ready' }}" },
+            { "name": "component", "value": "memory_log" }
+          ]
+        }
+      },
+      "id": "result",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 0]
+    }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Store in Qdrant", "type": "main", "index": 0 }]] },
+    "Store in Qdrant": { "main": [[{ "node": "Return Result", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "sub-workflow" }]
+}

@@ -37,7 +37,7 @@ async function ensureCollection() {
 }
 
 // Tool definitions
-const tools: Record<string, { description: string; params: Record<string, string>; handler: (p: any) => Promise<any> }> = {
+const tools: Record<string, { description: string; params: Record<string, string>; handler: (p: any, extra?: any) => Promise<any> }> = {
   store: {
     description: "Store a thought or note with automatic embedding generation",
     params: { content: "The content to store", tags: "Optional comma-separated tags", category: "Optional category name" },
@@ -54,7 +54,7 @@ const tools: Record<string, { description: string; params: Record<string, string
           points: [{
             id,
             vector: embedding,
-            payload: { content, tags: tagArray, category: category || "general", created_at: now, updated_at: now },
+            payload: { content, tags: tagArray, category: category || "general", created_at: now, updated_at: now, recorded_at: now },
           }],
         }),
       });
@@ -108,24 +108,25 @@ const tools: Record<string, { description: string; params: Record<string, string
     params: { memory_id: "Memory ID to update", content: "New content (optional)", tags: "New comma-separated tags (optional)", category: "New category (optional)" },
     handler: async ({ memory_id, content, tags, category }) => {
       const existing = await qdrantFetch(`/collections/${COLLECTION_NAME}/points/${memory_id}`);
-      const payload = { ...existing.result.payload, updated_at: new Date().toISOString() };
+      const now = new Date().toISOString();
+      const payload = { ...existing.result.payload, updated_at: now, recorded_at: now };
 
       if (tags) payload.tags = tags.split(",").map((t: string) => t.trim());
       if (category) payload.category = category;
 
-      let vector = undefined;
       if (content) {
         payload.content = content;
-        vector = await getEmbedding(content);
+        const vector = await getEmbedding(content);
+        await qdrantFetch(`/collections/${COLLECTION_NAME}/points`, {
+          method: "PUT",
+          body: JSON.stringify({ points: [{ id: memory_id, vector, payload }] }),
+        });
+      } else {
+        await qdrantFetch(`/collections/${COLLECTION_NAME}/points/payload`, {
+          method: "POST",
+          body: JSON.stringify({ payload, points: [memory_id] }),
+        });
       }
-
-      const point: any = { id: memory_id, payload };
-      if (vector) point.vector = vector;
-
-      await qdrantFetch(`/collections/${COLLECTION_NAME}/points`, {
-        method: "PUT",
-        body: JSON.stringify({ points: [point] }),
-      });
       return { status: "updated", memory_id };
     },
   },
@@ -160,6 +161,26 @@ const tools: Record<string, { description: string; params: Record<string, string
   },
 };
 
+const MEMORY_CALL_DESCRIPTION = `Proactive semantic memory. Store rich narrative context WITHOUT BEING ASKED when you encounter: decisions and reasoning, project state, architecture tradeoffs, solutions, action items, user preferences/corrections, personal context (family, schedule, work patterns), or conversation context worth preserving.
+
+Search before storing to avoid duplicates. If an existing memory covers the same topic, update it rather than creating a new one.
+
+Format: Self-contained — write so a different session with zero context could understand it. Include the "why" not just the "what."
+
+Tags: Comma-separated. Combine project (physicianux, fencequote, homelab, liquidink), type (decision, blocker, solution, state, action-item, preference, architecture, personal), and relevant entity names matching Neo4j node names for cross-referencing.
+
+Category: Project name, "general", or "personal"
+
+Read-side routing: Search Qdrant for narrative recall — "what did we discuss about...", "why did we decide...", fuzzy or semantic questions. If the query is structural ("what depends on X", "what's connected to Y"), search Neo4j instead. If you need the full picture, search Qdrant first for narrative, then Neo4j for connections.
+
+When to also write to Neo4j: When the content reveals structural relationships between entities (what uses what, what depends on what, who works on what). Qdrant stores the narrative; Neo4j stores the connections. Store Qdrant first, then create/update Neo4j nodes and relationships. Cross-referencing is handled by entity name tags in Qdrant payloads — no need to pass IDs between stores.
+
+When Qdrant only: Pure context, reasoning, preferences, or narrative that doesn't involve entity relationships.
+
+Don't store: Casual chat, temporary debug steps, widely known info.
+
+Note: The gateway auto-injects recorded_at on every write. You do not need to include timestamps.`;
+
 export function registerMemoryTools(server: McpServer) {
   server.tool(
     "memory_list",
@@ -177,18 +198,18 @@ export function registerMemoryTools(server: McpServer) {
 
   server.tool(
     "memory_call",
-    "Execute a memory tool. Use memory_list to see available tools.",
+    MEMORY_CALL_DESCRIPTION,
     {
       tool: z.string().describe("Tool name from memory_list"),
       params: z.record(z.any()).optional().describe("Tool parameters as object"),
     },
-    async ({ tool, params }) => {
+    async ({ tool, params }, extra) => {
       const toolDef = tools[tool];
       if (!toolDef) {
         return { content: [{ type: "text", text: JSON.stringify({ error: `Unknown tool: ${tool}`, available: Object.keys(tools) }) }] };
       }
       try {
-        const result = await toolDef.handler(params || {});
+        const result = await toolDef.handler(params || {}, extra);
         return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
       } catch (error: any) {
         return { content: [{ type: "text", text: JSON.stringify({ error: error.message }) }], isError: true };

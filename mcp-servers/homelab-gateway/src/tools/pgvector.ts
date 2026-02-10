@@ -25,7 +25,7 @@ async function getPool(): Promise<pg.Pool> {
       password: POSTGRES_PASSWORD,
       database: POSTGRES_DB,
     });
-    
+
     const client = await pool.connect();
     try {
       await pgvector.registerType(client);
@@ -81,7 +81,7 @@ const tools: Record<string, { description: string; params: Record<string, string
     handler: async ({ table, embedding, data }) => {
       const parsedEmbedding = typeof embedding === "string" ? JSON.parse(embedding) : embedding;
       const parsedData = data ? (typeof data === "string" ? JSON.parse(data) : data) : {};
-      
+
       const columns = ["embedding"];
       const values = [pgvector.toSql(parsedEmbedding)];
       const placeholders = ["$1"];

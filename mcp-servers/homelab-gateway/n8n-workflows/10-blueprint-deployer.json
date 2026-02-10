@@ -1,0 +1,164 @@
+{
+  "name": "Blueprint Deployer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "blueprint-deploy",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "blueprint-deploy"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Validate blueprint\nconst bp = $input.item.json.body?.blueprint || $input.item.json.blueprint;\nconst name = $input.item.json.body?.blueprint_name || $input.item.json.blueprint_name;\n\nif (!bp || !name) {\n  throw new Error('Missing blueprint or blueprint_name in request body');\n}\nif (!bp.components || Object.keys(bp.components).length === 0) {\n  throw new Error('Blueprint has no components');\n}\nif (!bp.guardrails) {\n  throw new Error('Blueprint missing guardrails section');\n}\n\nreturn {\n  blueprint_name: name,\n  blueprint: bp,\n  components: Object.entries(bp.components).map(([key, value]) => ({\n    component_key: key,\n    component_config: value\n  })),\n  total_components: Object.keys(bp.components).length\n};"
+      },
+      "id": "validate",
+      "name": "Validate Blueprint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Check for name conflicts in Vault\nconst name = $input.item.json.blueprint_name;\n// This is informational — actual conflict check happens in blueprint_call(save_blueprint)\nreturn {\n  ...$input.item.json,\n  conflict_check: 'passed',\n  deploy_started: new Date().toISOString()\n};"
+      },
+      "id": "conflict-check",
+      "name": "Check Conflicts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Fan out components for provisioning\nconst items = $input.item.json.components;\nreturn items.map(c => ({\n  json: {\n    blueprint_name: $input.item.json.blueprint_name,\n    blueprint: $input.item.json.blueprint,\n    component_key: c.component_key,\n    component_config: c.component_config,\n    deploy_started: $input.item.json.deploy_started\n  }\n}));"
+      },
+      "id": "fan-out",
+      "name": "Fan Out Components",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Route each component to the right provisioning sub-workflow\nconst key = $input.item.json.component_key;\nconst config = $input.item.json.component_config;\nconst bpName = $input.item.json.blueprint_name;\n\nlet result = { component_key: key, status: 'pending', details: {} };\n\ntry {\n  switch (key) {\n    case 'database':\n      result.sub_workflow = '[Sub] Provision PG Table';\n      result.input = { blueprint_name: bpName, schema: config.schema, target: config.target };\n      break;\n    case 'dify_app':\n      result.sub_workflow = '[Sub] Provision Dify App';\n      result.input = { name: bpName, type: config.type || 'agent-chat', model: config.model, system_prompt: config.system_prompt, description: $input.item.json.blueprint.description };\n      break;\n    case 'knowledge_base':\n      result.sub_workflow = '[Sub] Provision Dify Knowledge Base';\n      result.input = { name: config.name || bpName + '-kb', description: config.description || '', documents: config.documents || [] };\n      break;\n    case 'n8n_workflows':\n      // n8n_workflows is an array — provision each one\n      result.sub_workflow = '[Sub] Provision n8n Workflow';\n      result.input = config; // Array of workflow specs\n      result.is_array = true;\n      break;\n    default:\n      result.status = 'skipped';\n      result.details = 'Unknown component type: ' + key;\n  }\n  result.status = 'provisioning';\n} catch (e) {\n  result.status = 'failed';\n  result.details = e.message;\n}\n\nreturn result;"
+      },
+      "id": "route-provision",
+      "name": "Route to Sub-Workflow",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Collect all provisioning results and build state\nconst results = $input.all().map(item => ({\n  component: item.json.component_key,\n  status: item.json.status,\n  sub_workflow: item.json.sub_workflow,\n  details: item.json.details || {}\n}));\n\nconst allOk = results.every(r => r.status !== 'failed');\nconst bpName = $input.first().json.blueprint_name || 'unknown';\n\nreturn {\n  blueprint_name: bpName,\n  overall_status: allOk ? 'deployed' : 'partial',\n  components: results,\n  deployed_at: new Date().toISOString()\n};"
+      },
+      "id": "collect-results",
+      "name": "Collect Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'graph_call', arguments: { tool: 'create_entities', params: { entities: [{ name: 'agent-' + $json.blueprint_name, entityType: 'Agent', observations: ['Blueprint deployed at ' + $json.deployed_at, 'Status: ' + $json.overall_status, 'Components: ' + $json.components.map(c => c.component).join(', ')] }] } } } }) }}"
+      },
+      "id": "register-graph",
+      "name": "Register in Graph",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'memory_call', arguments: { tool: 'store_memory', params: { content: 'Deployed blueprint: ' + $('Collect Results').item.json.blueprint_name + '. Status: ' + $('Collect Results').item.json.overall_status + '. Components: ' + JSON.stringify($('Collect Results').item.json.components), metadata: { type: 'blueprint-deploy', blueprint: $('Collect Results').item.json.blueprint_name, status: $('Collect Results').item.json.overall_status } } } } }) }}"
+      },
+      "id": "log-deploy",
+      "name": "Log to Memory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.VAULT_ADDR }}/v1/{{ $env.VAULT_MOUNT || 'homelab' }}/data/blueprints/{{ $('Collect Results').item.json.blueprint_name }}/state",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "X-Vault-Token", "value": "={{ $env.VAULT_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ data: { status: $('Collect Results').item.json.overall_status, components: $('Collect Results').item.json.components, deployed_at: $('Collect Results').item.json.deployed_at } }) }}"
+      },
+      "id": "update-state",
+      "name": "Update State in Vault",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1760, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true, blueprint: $('Collect Results').item.json.blueprint_name, status: $('Collect Results').item.json.overall_status, components: $('Collect Results').item.json.components, deployed_at: $('Collect Results').item.json.deployed_at }) }}"
+      },
+      "id": "respond",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1980, 0]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Validate Blueprint", "type": "main", "index": 0 }]] },
+    "Validate Blueprint": { "main": [[{ "node": "Check Conflicts", "type": "main", "index": 0 }]] },
+    "Check Conflicts": { "main": [[{ "node": "Fan Out Components", "type": "main", "index": 0 }]] },
+    "Fan Out Components": { "main": [[{ "node": "Route to Sub-Workflow", "type": "main", "index": 0 }]] },
+    "Route to Sub-Workflow": { "main": [[{ "node": "Collect Results", "type": "main", "index": 0 }]] },
+    "Collect Results": { "main": [[{ "node": "Register in Graph", "type": "main", "index": 0 }]] },
+    "Register in Graph": { "main": [[{ "node": "Log to Memory", "type": "main", "index": 0 }]] },
+    "Log to Memory": { "main": [[{ "node": "Update State in Vault", "type": "main", "index": 0 }]] },
+    "Update State in Vault": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "deployer" }]
+}

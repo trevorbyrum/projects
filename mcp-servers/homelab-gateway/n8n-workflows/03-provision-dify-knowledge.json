@@ -1,0 +1,91 @@
+{
+  "name": "[Sub] Provision Dify Knowledge Base",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "start",
+      "name": "Start",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'dify_call', arguments: { tool: 'create_dataset', params: { name: $json.name, description: $json.description || '' } } } }) }}"
+      },
+      "id": "create-kb",
+      "name": "Create Knowledge Base",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "mode": "raw",
+        "jsonOutput": "={{ (() => { const docs = $('Start').item.json.documents || []; const datasetId = $('Create Knowledge Base').item.json.id; return docs.map((d, i) => ({ json: { dataset_id: datasetId, name: d.name || 'doc-' + i, text: d.text || d } })); })() }}"
+      },
+      "id": "split-docs",
+      "name": "Split Documents",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'dify_call', arguments: { tool: 'upload_document', params: { dataset_id: $json.dataset_id, name: $json.name, text: $json.text } } } }) }}"
+      },
+      "id": "upload-doc",
+      "name": "Upload Document",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            { "name": "status", "value": "ready" },
+            { "name": "component", "value": "knowledge_base" },
+            { "name": "dataset_id", "value": "={{ $('Create Knowledge Base').item.json.id }}" },
+            { "name": "name", "value": "={{ $('Start').item.json.name }}" }
+          ]
+        }
+      },
+      "id": "result",
+      "name": "Return Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [880, 0]
+    }
+  ],
+  "connections": {
+    "Start": { "main": [[{ "node": "Create Knowledge Base", "type": "main", "index": 0 }]] },
+    "Create Knowledge Base": { "main": [[{ "node": "Split Documents", "type": "main", "index": 0 }]] },
+    "Split Documents": { "main": [[{ "node": "Upload Document", "type": "main", "index": 0 }]] },
+    "Upload Document": { "main": [[{ "node": "Return Result", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "sub-workflow" }]
+}

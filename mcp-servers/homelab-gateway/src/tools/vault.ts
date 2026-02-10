@@ -4,12 +4,13 @@ import { z } from "zod";
 const VAULT_ADDR = process.env.VAULT_ADDR || "http://Vault:8200";
 const VAULT_TOKEN = process.env.VAULT_TOKEN || "";
 const VAULT_MOUNT = process.env.VAULT_MOUNT || "homelab";
+const VAULT_UNSEAL_KEY = process.env.VAULT_UNSEAL_KEY || "";
 
 async function vaultRequest(method: string, path: string, body?: any): Promise<any> {
   if (!VAULT_TOKEN) {
     throw new Error("Vault not configured - check VAULT_TOKEN env var");
   }
-  
+
   const url = `${VAULT_ADDR}/v1/${path}`;
   const response = await fetch(url, {
     method,
@@ -30,6 +31,30 @@ async function vaultRequest(method: string, path: string, body?: any): Promise<a
 }
 
 const tools: Record<string, { description: string; params: Record<string, string>; handler: (p: any) => Promise<any> }> = {
+  status: {
+    description: "Check if Vault is sealed or reachable",
+    params: {},
+    handler: async () => {
+      const res = await fetch(VAULT_ADDR + "/v1/sys/health").catch(() => null);
+      if (!res) return { status: "unreachable", addr: VAULT_ADDR };
+      const d = await res.json().catch(() => ({}));
+      return { sealed: d.sealed, initialized: d.initialized, version: d.version };
+    },
+  },
+  unseal: {
+    description: "Unseal Vault using the stored unseal key from env",
+    params: {},
+    handler: async () => {
+      if (!VAULT_UNSEAL_KEY) throw new Error("VAULT_UNSEAL_KEY not set in env");
+      const r = await fetch(VAULT_ADDR + "/v1/sys/unseal", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: VAULT_UNSEAL_KEY }),
+      });
+      const d = await r.json();
+      return { sealed: d.sealed, progress: d.progress };
+    },
+  },
   store: {
     description: "Store a secret in HashiCorp Vault (KV v2)",
     params: { path: "Secret path (e.g., 'openrouter', 'services/github')", data: "JSON object of key-value pairs to store" },

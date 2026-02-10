@@ -1,0 +1,122 @@
+{
+  "name": "Agent Health Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9 * * *" }]
+        }
+      },
+      "id": "cron",
+      "name": "Daily 9am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.VAULT_ADDR }}/v1/{{ $env.VAULT_MOUNT || 'homelab' }}/metadata/blueprints?list=true",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Vault-Token", "value": "={{ $env.VAULT_TOKEN }}" }
+          ]
+        }
+      },
+      "id": "list-blueprints",
+      "name": "List Blueprints",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Extract blueprint names from Vault list\nconst keys = $input.item.json.data?.keys || [];\n// Filter out non-directory entries and the templates prefix\nconst blueprints = keys.filter(k => k.endsWith('/')).map(k => k.replace(/\\/$/, ''));\n\nif (blueprints.length === 0) {\n  return { blueprints: [], count: 0, message: 'No blueprints found' };\n}\n\nreturn { blueprints, count: blueprints.length };"
+      },
+      "id": "parse-names",
+      "name": "Parse Blueprint Names",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Fan out to check each blueprint\nconst names = $input.item.json.blueprints || [];\nreturn names.map(name => ({ json: { blueprint_name: name } }));"
+      },
+      "id": "fan-out",
+      "name": "Fan Out",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'blueprint_call', arguments: { tool: 'get_blueprint_status', params: { name: $json.blueprint_name } } } }) }}"
+      },
+      "id": "check-status",
+      "name": "Check Blueprint Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Collect all statuses into a health report\nconst results = $input.all().map(item => {\n  try {\n    const text = item.json.result?.content?.[0]?.text;\n    return text ? JSON.parse(text) : { name: 'unknown', error: 'no response' };\n  } catch {\n    return { name: 'unknown', error: 'parse error' };\n  }\n});\n\nconst healthy = results.filter(r => r.blueprint_status === 'deployed' || r.blueprint_status === 'active');\nconst unhealthy = results.filter(r => r.blueprint_status === 'killed' || r.blueprint_status === 'failed');\nconst overBudget = results.filter(r => r.today_actions > (r.max_daily_actions || Infinity));\n\nconst report = {\n  generated_at: new Date().toISOString(),\n  total_agents: results.length,\n  healthy: healthy.length,\n  unhealthy: unhealthy.length,\n  over_budget: overBudget.length,\n  agents: results,\n  summary: `Health Report: ${healthy.length}/${results.length} agents healthy. ${overBudget.length} over budget. ${unhealthy.length} unhealthy.`\n};\n\nreturn report;"
+      },
+      "id": "build-report",
+      "name": "Build Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MCP_GATEWAY_URL }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Accept", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'memory_call', arguments: { tool: 'store_memory', params: { content: $json.summary + ' Details: ' + JSON.stringify($json.agents).substring(0, 2000), metadata: { type: 'health-report', date: new Date().toISOString().slice(0, 10), total: $json.total_agents, healthy: $json.healthy, unhealthy: $json.unhealthy } } } } }) }}"
+      },
+      "id": "store-report",
+      "name": "Store in Memory",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1320, 0],
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Daily 9am": { "main": [[{ "node": "List Blueprints", "type": "main", "index": 0 }]] },
+    "List Blueprints": { "main": [[{ "node": "Parse Blueprint Names", "type": "main", "index": 0 }]] },
+    "Parse Blueprint Names": { "main": [[{ "node": "Fan Out", "type": "main", "index": 0 }]] },
+    "Fan Out": { "main": [[{ "node": "Check Blueprint Status", "type": "main", "index": 0 }]] },
+    "Check Blueprint Status": { "main": [[{ "node": "Build Report", "type": "main", "index": 0 }]] },
+    "Build Report": { "main": [[{ "node": "Store in Memory", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "blueprint-system" }, { "name": "monitoring" }]
+}
