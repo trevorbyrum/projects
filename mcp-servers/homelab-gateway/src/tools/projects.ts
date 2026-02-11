@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import pg from "pg";
+import { searchPreferences } from "./preferences.js";
 
 const { Pool } = pg;
 
@@ -11,9 +12,38 @@ const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || "";
 const POSTGRES_DB = process.env.POSTGRES_DB || "";
 const NTFY_URL = process.env.NTFY_URL || "http://ntfy:80";
 const NTFY_TOPIC = process.env.NTFY_TOPIC || "homelab-projects";
+const NTFY_USER = process.env.NTFY_USER || "";
+const NTFY_PASSWORD = process.env.NTFY_PASSWORD || "";
 const N8N_WEBHOOK_BASE = process.env.N8N_WEBHOOK_BASE || "http://n8n:5678/webhook";
 
+// n8n 2.4.6 webhook URLs include workflowId prefix: /webhook/{workflowId}/webhook/{path}
+const N8N_WEBHOOK_IDS: Record<string, string> = {
+  "project-gitlab-sync": "",
+  "project-research-pipeline": "",
+  "project-research-resume": "",
+  "dev-team-orchestrator": "",  // path-only webhook format (API-created)
+  "dev-team-architecture": "",  // path-only webhook format (API-created)
+  "dev-team-planning": "",        // path-only webhook format (API-created)
+  "dev-team-sprint-runner": "",  // path-only webhook format (API-created)
+  "dev-team-review-loop": "",    // path-only webhook format (API-created)
+};
+
 let pool: pg.Pool | null = null;
+
+// ── Async Workflow Job Store ────────────────────────────────
+interface AsyncJob {
+  id: string;
+  workflow: string;
+  status: "running" | "succeeded" | "failed";
+  started_at: string;
+  completed_at?: string;
+  result?: any;
+  error?: string;
+  elapsed_time?: number;
+  total_tokens?: number;
+}
+const asyncJobs = new Map<string, AsyncJob>();
+let jobCounter = 0;
 
 function getPool(): pg.Pool {
   if (!pool) {
@@ -43,6 +73,7 @@ async function pgQuery(sql: string, params: any[] = []): Promise<any> {
 async function ntfyNotify(message: string, title?: string, priority?: number, tags?: string[]): Promise<void> {
   try {
     const headers: Record<string, string> = {};
+    if (NTFY_USER && NTFY_PASSWORD) headers["Authorization"] = "Basic " + Buffer.from(`${NTFY_USER}:${NTFY_PASSWORD}`).toString("base64");
     if (title) headers["Title"] = title;
     if (priority) headers["Priority"] = String(priority);
     if (tags?.length) headers["Tags"] = tags.join(",");
@@ -57,20 +88,35 @@ async function ntfyNotify(message: string, title?: string, priority?: number, ta
 }
 
 async function triggerN8n(webhookPath: string, data: Record<string, any>): Promise<any> {
+  const startTime = Date.now();
   try {
-    const res = await fetch(`${N8N_WEBHOOK_BASE}/${webhookPath}`, {
+    const wfId = N8N_WEBHOOK_IDS[webhookPath] || "";
+    const fullPath = wfId ? `${wfId}/webhook/${webhookPath}` : webhookPath;
+    log("info", "n8n", "trigger", `Calling webhook: ${webhookPath}`, { data_keys: Object.keys(data) });
+
+    const res = await fetch(`${N8N_WEBHOOK_BASE}/${fullPath}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data),
     });
+    const elapsed = Date.now() - startTime;
+
     if (!res.ok) {
-      console.error(`n8n webhook ${webhookPath} returned ${res.status}`);
+      const body = await res.text().catch(() => "(no body)");
+      await ntfyError("n8n", webhookPath, `Webhook returned HTTP ${res.status}`, {
+        webhook: webhookPath, status: res.status, body: body.slice(0, 500), elapsed_ms: elapsed,
+      });
       return null;
     }
+
     const text = await res.text();
+    log("info", "n8n", "trigger", `Webhook ${webhookPath} OK (${elapsed}ms)`, { response_length: text.length });
     try { return JSON.parse(text); } catch { return text; }
   } catch (e: any) {
-    console.error(`n8n webhook ${webhookPath} failed:`, e.message);
+    const elapsed = Date.now() - startTime;
+    await ntfyError("n8n", webhookPath, `Webhook call failed: ${e.message}`, {
+      webhook: webhookPath, error: e.message, elapsed_ms: elapsed,
+    });
     return null;
   }
 }
@@ -82,12 +128,342 @@ function slugify(name: string): string {
     .replace(/^-|-$/g, "");
 }
 
-const VALID_STAGES = ["queue", "research", "planning", "active", "completed", "archived"];
-const STAGE_ORDER = ["queue", "research", "planning", "active", "completed"];
+const VALID_STAGES = ["queue", "research", "architecture", "security_review", "planning", "active", "completed", "archived"];
+const STAGE_ORDER = ["queue", "research", "architecture", "security_review", "planning", "active", "completed"];
+// Section order: ui-ux-research moved early (position 3) so design decisions inform downstream sections
 const RESEARCH_SECTIONS = [
-  "libraries", "architecture", "security", "dependencies",
-  "file-structure", "tools", "containers", "integration", "costs",
+  "libraries", "security", "ui-ux-research",
+  "architecture", "dependencies", "file-structure",
+  "tools", "containers", "integration", "costs",
+  "open-source-scan", "best-practices", "prior-art",
 ];
+
+// Maps each research section to a preference search query for relevant design/dev preferences
+const SECTION_PREF_QUERIES: Record<string, string> = {
+  "libraries":        "libraries tooling frameworks packages",
+  "security":         "security authentication authorization best practices",
+  "ui-ux-research":   "UI UX design aesthetic visual patterns accessibility",
+  "architecture":     "architecture patterns state management data flow",
+  "dependencies":     "dependencies package management versioning",
+  "file-structure":   "file structure project organization code layout",
+  "tools":            "development tools build system linting testing",
+  "containers":       "containers Docker deployment infrastructure",
+  "integration":      "API integration services communication",
+  "costs":            "cost estimation hosting infrastructure pricing",
+  "open-source-scan": "open source licensing compliance",
+  "best-practices":   "best practices coding standards conventions",
+  "prior-art":        "prior art similar projects inspiration",
+};
+
+// ── Structured Logging ──────────────────────────────────────
+
+function log(level: "info" | "warn" | "error", module: string, op: string, msg: string, meta?: Record<string, any>) {
+  const ts = new Date().toISOString();
+  const prefix = `[${ts}] [${level.toUpperCase()}] [projects/${module}] [${op}]`;
+  const metaStr = meta ? " " + JSON.stringify(meta) : "";
+  if (level === "error") {
+    console.error(`${prefix} ${msg}${metaStr}`);
+  } else if (level === "warn") {
+    console.warn(`${prefix} ${msg}${metaStr}`);
+  } else {
+    console.log(`${prefix} ${msg}${metaStr}`);
+  }
+}
+
+async function ntfyError(module: string, op: string, error: string, meta?: Record<string, any>) {
+  const details = meta ? "\n" + JSON.stringify(meta, null, 2) : "";
+  log("error", module, op, error, meta);
+  await ntfyNotify(
+    `[${module}/${op}] ${error}${details}`,
+    "Pipeline Error",
+    5,
+    ["rotating_light"]
+  );
+}
+
+async function ntfyWarn(module: string, op: string, message: string, meta?: Record<string, any>) {
+  const details = meta ? "\n" + JSON.stringify(meta, null, 2) : "";
+  log("warn", module, op, message, meta);
+  await ntfyNotify(
+    `[${module}/${op}] ${message}${details}`,
+    "Pipeline Warning",
+    4,
+    ["warning"]
+  );
+}
+
+
+// Dify workflow API keys per research section
+const DIFY_SECTION_KEYS: Record<string, string> = {
+  "libraries":         "app-YOUR_SECTION_KEY",
+  "architecture":      "app-YOUR_SECTION_KEY",
+  "security":          "app-YOUR_SECTION_KEY",
+  "dependencies":      "app-YOUR_SECTION_KEY",
+  "file-structure":    "app-YOUR_SECTION_KEY",
+  "tools":             "app-YOUR_SECTION_KEY",
+  "containers":        "app-YOUR_SECTION_KEY",
+  "integration":       "app-YOUR_SECTION_KEY",
+  "costs":             "app-YOUR_SECTION_KEY",
+  "open-source-scan":  "app-YOUR_SECTION_KEY",
+  "best-practices":    "app-YOUR_SECTION_KEY",
+  "ui-ux-research":    "app-YOUR_SECTION_KEY",
+  "prior-art":         "app-YOUR_SECTION_KEY",
+};
+
+// Dev-team Dify workflow API keys
+const DIFY_DEVTEAM_KEYS: Record<string, string> = {
+  "architect-design":        "app-YOUR_DEVTEAM_KEY",
+  "architect-revise":        "app-YOUR_DEVTEAM_KEY",
+  "security-review":         "app-YOUR_DEVTEAM_KEY",
+  "pm-generate-sow":         "app-YOUR_DEVTEAM_KEY",
+  "pm-generate-task-prompts":"app-YOUR_DEVTEAM_KEY",
+  "code-reviewer":           "app-YOUR_DEVTEAM_KEY",
+};
+
+const DIFY_API_BASE = process.env.DIFY_API_BASE || "http://dify-api:5001";
+
+async function callDify(apiKey: string, inputs: Record<string, string>, workflowName?: string): Promise<any> {
+  const startTime = Date.now();
+  const label = workflowName || apiKey.slice(0, 12);
+  log("info", "dify", "call", `Calling workflow: ${label}`, { input_keys: Object.keys(inputs) });
+
+  try {
+    const res = await fetch(`${DIFY_API_BASE}/v1/workflows/run`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        inputs,
+        response_mode: "blocking",
+        user: "mcp-gateway",
+      }),
+    });
+    const elapsed = Date.now() - startTime;
+
+    if (!res.ok) {
+      const body = await res.text();
+      const errMsg = `Dify workflow ${label} returned HTTP ${res.status}: ${body.slice(0, 500)}`;
+      await ntfyError("dify", label, errMsg, { status: res.status, elapsed_ms: elapsed });
+      throw new Error(errMsg);
+    }
+
+    const result = await res.json();
+    log("info", "dify", "call", `Workflow ${label} completed (${elapsed}ms)`, {
+      status: result?.data?.status,
+      tokens: result?.data?.total_tokens,
+      elapsed_ms: elapsed,
+    });
+    return result;
+  } catch (e: any) {
+    if (!e.message.includes("Dify workflow")) {
+      // Network/fetch error (not our rethrown error)
+      const elapsed = Date.now() - startTime;
+      await ntfyError("dify", label, `Workflow call failed: ${e.message}`, { elapsed_ms: elapsed });
+    }
+    throw e;
+  }
+}
+
+async function runResearchPipeline(project: { id: number; slug: string; name: string; description: string | null }): Promise<void> {
+  const serverContext = "Unraid Tower server with Docker, Traefik reverse proxy, PostgreSQL, Neo4j, n8n, Dify";
+  let completedCount = 0;
+  const totalSections = RESEARCH_SECTIONS.length;
+  const accumulatedFindings: Record<string, any> = {};
+
+  // Load user preferences once for the project context
+  let projectPreferences: any[] = [];
+  try {
+    projectPreferences = await searchPreferences(
+      `${project.name} ${project.description || ""} development preferences`,
+      15
+    );
+    log("info", "research", "preferences", `Loaded ${projectPreferences.length} base preferences for ${project.slug}`);
+  } catch (prefErr: any) {
+    log("warn", "research", "preferences", `Failed to load preferences: ${prefErr.message}`);
+  }
+
+  for (const section of RESEARCH_SECTIONS) {
+    try {
+      const apiKey = DIFY_SECTION_KEYS[section];
+      if (!apiKey) {
+        await ntfyError("research", section, `No Dify API key configured for section: ${section}`, { slug: project.slug });
+        continue;
+      }
+
+      // Mark section as in_progress
+      await pgQuery(
+        `UPDATE pipeline_research SET status = 'in_progress', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+        [project.id, section]
+      );
+
+      log("info", "research", section, `Starting section for ${project.slug}`);
+
+      // Get section-specific preferences
+      let sectionPreferences = projectPreferences;
+      const prefQuery = SECTION_PREF_QUERIES[section];
+      if (prefQuery) {
+        try {
+          const sectionSpecific = await searchPreferences(prefQuery, 10);
+          // Merge and deduplicate by ID
+          const seen = new Set(sectionPreferences.map((p: any) => p.id));
+          for (const sp of sectionSpecific) {
+            if (!seen.has(sp.id)) {
+              sectionPreferences = [...sectionPreferences, sp];
+              seen.add(sp.id);
+            }
+          }
+        } catch { /* use base preferences */ }
+      }
+
+      // Build inputs with accumulated findings and preferences
+      const inputs: Record<string, string> = {
+        project_name: project.name,
+        project_description: project.description || "",
+        section,
+        server_context: serverContext,
+        existing_findings: Object.keys(accumulatedFindings).length > 0
+          ? JSON.stringify(accumulatedFindings)
+          : "",
+        user_preferences: sectionPreferences.length > 0
+          ? JSON.stringify(sectionPreferences.map((p: any) => ({
+              domain: p.domain, topic: p.topic, context: p.context,
+              preference: p.preference, anti_pattern: p.anti_pattern,
+              examples: p.examples, confidence: p.confidence,
+            })))
+          : "",
+      };
+
+      const difyResponse = await callDify(apiKey, inputs, `research-${section}`);
+
+      // Parse the Dify response
+      const data = difyResponse?.data;
+      if (!data || data.status !== "succeeded") {
+        const errMsg = data?.error || "Dify workflow did not succeed";
+        log("error", "research", section, `Dify failed for ${project.slug}: ${errMsg}`);
+        await pgQuery(
+          `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+          [project.id, section]
+        );
+        await ntfyNotify(
+          `Research FAILED for ${project.name} / ${section}: ${errMsg}`,
+          "Research Section Failed",
+          4,
+          ["x"]
+        );
+        continue;
+      }
+
+      // Parse the result string - may be JSON or plain text
+      let findings: any = null;
+      let concerns: string[] = [];
+      let recommendations: string[] = [];
+      let confidenceScore: number | null = null;
+      let questions: Array<{ question: string; context: string; priority: string }> = [];
+
+      const resultRaw = data.outputs?.result;
+      if (resultRaw) {
+        try {
+          const parsed = typeof resultRaw === "string" ? JSON.parse(resultRaw) : resultRaw;
+          findings = parsed.findings ?? null;
+          concerns = Array.isArray(parsed.concerns) ? parsed.concerns : [];
+          recommendations = Array.isArray(parsed.recommendations) ? parsed.recommendations : [];
+          confidenceScore = typeof parsed.confidence_score === "number" ? parsed.confidence_score : null;
+          questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+        } catch {
+          // If result is not valid JSON, store the raw text as findings
+          findings = { raw: resultRaw };
+        }
+      }
+
+      // Accumulate findings for downstream sections
+      if (findings) {
+        accumulatedFindings[section] = {
+          findings,
+          concerns,
+          recommendations,
+          confidence_score: confidenceScore,
+        };
+      }
+
+      // Update the research section in PG
+      await pgQuery(
+        `UPDATE pipeline_research
+         SET findings = $1, concerns = $2, recommendations = $3, confidence_score = $4, status = 'complete', updated_at = NOW()
+         WHERE project_id = $5 AND section = $6`,
+        [
+          findings ? JSON.stringify(findings) : null,
+          concerns,
+          recommendations,
+          confidenceScore,
+          project.id,
+          section,
+        ]
+      );
+
+      // Insert any questions
+      for (const q of questions) {
+        try {
+          await pgQuery(
+            `INSERT INTO pipeline_questions (project_id, question, context, priority)
+             VALUES ($1, $2, $3, $4)`,
+            [project.id, q.question, q.context || null, q.priority || "normal"]
+          );
+        } catch (qErr: any) {
+          log("warn", "research", section, `Failed to insert question for ${project.slug}: ${qErr.message}`);
+        }
+      }
+
+      completedCount++;
+      const elapsed = data.elapsed_time ? `${data.elapsed_time.toFixed(1)}s` : "?";
+      const tokens = data.total_tokens || "?";
+
+      await ntfyNotify(
+        `${project.name} / ${section} complete (${elapsed}, ${tokens} tokens). ${completedCount}/${totalSections} done.`,
+        "Research Section Done",
+        3,
+        ["microscope"]
+      );
+
+      log("info", "research", section, `Complete for ${project.slug} (${elapsed}, ${tokens} tokens)`);
+
+    } catch (err: any) {
+      log("error", "research", section, `Error for ${project.slug}: ${err.message}`);
+      // Mark section back to pending so it can be retried
+      try {
+        await pgQuery(
+          `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+          [project.id, section]
+        );
+      } catch { /* ignore */ }
+
+      await ntfyNotify(
+        `Research ERROR for ${project.name} / ${section}: ${err.message}`,
+        "Research Section Error",
+        4,
+        ["x"]
+      );
+    }
+  }
+
+  // Final summary notification
+  const failedCount = totalSections - completedCount;
+  const summaryMsg = failedCount === 0
+    ? `All ${totalSections} research sections complete for ${project.name}!`
+    : `Research finished for ${project.name}: ${completedCount}/${totalSections} succeeded, ${failedCount} failed.`;
+  const summaryPriority = failedCount === 0 ? 4 : 3;
+  const summaryTag = failedCount === 0 ? "white_check_mark" : "warning";
+
+  await ntfyNotify(summaryMsg, "Research Pipeline Complete", summaryPriority, [summaryTag]);
+
+  await pgQuery(
+    `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
+    [project.id, "research_pipeline_complete", JSON.stringify({ completed: completedCount, failed: failedCount, total: totalSections })]
+  );
+
+  log("info", "research", "pipeline", `Pipeline finished for ${project.slug}: ${completedCount}/${totalSections} succeeded`);
+}
 
 // --- Sub-tools ---
 
@@ -127,7 +503,7 @@ const tools: Record<string, {
       );
 
       // Trigger n8n GitLab sync
-      triggerN8n("project-gitlab-sync", { action: "create", project });
+      await triggerN8n("project-gitlab-sync", { action: "create", project });
 
       // Notify
       await ntfyNotify(`New project: ${p.name}`, "Project Created", 3, ["rocket"]);
@@ -139,7 +515,7 @@ const tools: Record<string, {
   list_projects: {
     description: "List projects with optional filters. Returns summary with question counts.",
     params: {
-      stage: "(optional) Filter by stage: queue|research|planning|active|completed|archived",
+      stage: "(optional) Filter by stage: queue|research|architecture|security_review|planning|active|completed|archived",
       priority: "(optional) Filter by priority (1-5)",
       tag: "(optional) Filter by tag",
       limit: "(optional) Max results, default 50",
@@ -224,13 +600,13 @@ const tools: Record<string, {
       if (result.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
 
       const project = result.rows[0];
-      triggerN8n("project-gitlab-sync", { action: "update", project });
+      await triggerN8n("project-gitlab-sync", { action: "update", project });
       return project;
     },
   },
 
   advance_stage: {
-    description: "Move project to next stage with validation gates. queue->research->planning->active->completed.",
+    description: "Move project to next stage with validation gates. queue→research→architecture→security_review→planning→active→completed.",
     params: { slug: "Project slug" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
@@ -244,20 +620,51 @@ const tools: Record<string, {
       const nextStage = STAGE_ORDER[currentIdx + 1];
 
       // Validation gates
-      if (nextStage === "planning") {
+      if (nextStage === "architecture") {
+        // All research sections must be complete
         const research = await pgQuery(
           `SELECT section, status FROM pipeline_research WHERE project_id = $1`, [project.id]
         );
         const incomplete = research.rows.filter((r: any) => r.status !== "complete");
         if (incomplete.length > 0) {
-          throw new Error(`Cannot advance to planning: ${incomplete.length} research sections incomplete: ${incomplete.map((r: any) => r.section).join(", ")}`);
+          throw new Error(`Cannot advance to architecture: ${incomplete.length} research sections incomplete: ${incomplete.map((r: any) => r.section).join(", ")}`);
         }
         const blocking = await pgQuery(
           `SELECT COUNT(*) as count FROM pipeline_questions WHERE project_id = $1 AND answer IS NULL AND priority = 'blocking'`,
           [project.id]
         );
         if (parseInt(blocking.rows[0].count) > 0) {
-          throw new Error(`Cannot advance to planning: ${blocking.rows[0].count} blocking questions unanswered`);
+          throw new Error(`Cannot advance to architecture: ${blocking.rows[0].count} blocking questions unanswered`);
+        }
+      }
+
+      if (nextStage === "security_review") {
+        // Architecture design must be stored in research table as section type 'architecture-design'
+        const archDesign = await pgQuery(
+          `SELECT id FROM pipeline_research WHERE project_id = $1 AND section = 'architecture-design' AND status = 'complete'`,
+          [project.id]
+        );
+        if (archDesign.rowCount === 0) {
+          throw new Error("Cannot advance to security_review: architecture design not stored");
+        }
+      }
+
+      if (nextStage === "planning") {
+        // No blocking security issues
+        const secReview = await pgQuery(
+          `SELECT id FROM pipeline_research WHERE project_id = $1 AND section = 'security-assessment' AND status = 'complete'`,
+          [project.id]
+        );
+        if (secReview.rowCount === 0) {
+          throw new Error("Cannot advance to planning: security review not complete");
+        }
+        // Check for blocking security findings in agent_tasks
+        const blockingSec = await pgQuery(
+          `SELECT COUNT(*) as count FROM agent_tasks WHERE project_id = $1 AND task_type = 'security' AND status = 'failed'`,
+          [project.id]
+        );
+        if (parseInt(blockingSec.rows[0].count) > 0) {
+          throw new Error("Cannot advance to planning: unresolved blocking security issues");
         }
       }
 
@@ -302,8 +709,27 @@ const tools: Record<string, {
         [project.id, "stage_changed", JSON.stringify({ from: project.stage, to: nextStage })]
       );
 
-      triggerN8n("project-gitlab-sync", { action: "stage_change", project: result.rows[0], from: project.stage, to: nextStage });
-      await ntfyNotify(`${project.name}: ${project.stage} -> ${nextStage}`, "Stage Change", 3, ["arrow_right"]);
+      await triggerN8n("project-gitlab-sync", { action: "stage_change", project: result.rows[0], from: project.stage, to: nextStage });
+
+      // Trigger dev-team orchestrator for automated stages
+      const automatedStages = ["architecture", "security_review", "active"];
+      if (automatedStages.includes(nextStage)) {
+        log("info", "stage", "advance", `Triggering dev-team-orchestrator for stage: ${nextStage}`, { slug: p.slug });
+        const orchResult = await triggerN8n("dev-team-orchestrator", {
+          action: "stage_entered",
+          stage: nextStage,
+          project: result.rows[0],
+        });
+        if (!orchResult) {
+          await ntfyError("stage", "orchestrator", `Dev-team orchestrator FAILED to trigger for ${p.slug} → ${nextStage}`, {
+            slug: p.slug, stage: nextStage,
+          });
+        } else {
+          log("info", "stage", "advance", `Dev-team orchestrator triggered OK for ${nextStage}`, { slug: p.slug, result: orchResult });
+        }
+      }
+
+      await ntfyNotify(`${project.name}: ${project.stage} → ${nextStage}`, "Stage Change", 3, ["arrow_right"]);
 
       return result.rows[0];
     },
@@ -330,7 +756,7 @@ const tools: Record<string, {
   // ── Research ─────────────────────────────────────────────
 
   start_research: {
-    description: "Set project stage to 'research' and trigger the n8n research pipeline. Creates placeholder research sections.",
+    description: "Set project stage to 'research' and run the Dify research pipeline. Creates placeholder research sections and processes them sequentially via Dify.",
     params: { slug: "Project slug" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
@@ -356,17 +782,21 @@ const tools: Record<string, {
         [project.id, "research_started", JSON.stringify({ sections: RESEARCH_SECTIONS })]
       );
 
-      // Trigger n8n research pipeline
-      triggerN8n("project-research-pipeline", {
-        slug: project.slug,
+      // Fire-and-forget: run Dify research pipeline in background
+      runResearchPipeline({
         id: project.id,
+        slug: project.slug,
         name: project.name,
         description: project.description,
+      }).catch(async (err) => {
+        await ntfyError("research", "pipeline", `Pipeline CRASHED for ${project.slug}: ${err.message}`, {
+          slug: project.slug, error: err.message, stack: err.stack?.slice(0, 500),
+        });
       });
 
       await ntfyNotify(`Research started for: ${project.name}`, "Research Started", 3, ["mag"]);
 
-      return { ok: true, slug: project.slug, sections: RESEARCH_SECTIONS, message: "Research pipeline triggered" };
+      return { ok: true, slug: project.slug, sections: RESEARCH_SECTIONS, message: "Dify research pipeline launched (runs in background)" };
     },
   },
 
@@ -388,7 +818,7 @@ const tools: Record<string, {
     description: "Update a specific research section with findings.",
     params: {
       slug: "Project slug",
-      section: "Section name (libraries, architecture, security, dependencies, file-structure, tools, containers, integration, costs)",
+      section: "Section name (libraries, architecture, security, dependencies, file-structure, tools, containers, integration, costs, open-source-scan, best-practices, ui-ux-research, prior-art, architecture-design, security-assessment)",
       findings: "(optional) Findings as JSON object",
       concerns: "(optional) Array of concern strings",
       recommendations: "(optional) Array of recommendation strings",
@@ -699,6 +1129,187 @@ const tools: Record<string, {
     },
   },
 
+  // ── Agent Tasks ────────────────────────────────────────
+
+  create_agent_task: {
+    description: "Create an agent task for a project sprint. Used by the dev-team orchestrator to queue work items.",
+    params: {
+      slug: "Project slug",
+      sprint_number: "(optional) Sprint number",
+      task_type: "Task type: architect|security|code|review|test|ui",
+      agent_model: "(optional) Model to use (e.g. deepseek/deepseek-r1, anthropic/claude-sonnet-4-5)",
+      prompt: "Task prompt for the agent",
+      tools_enabled: "(optional) Array of gateway tool names this agent can use",
+      guardrails: "(optional) Object: {max_actions, max_tokens, timeout_minutes}",
+    },
+    handler: async (p) => {
+      const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+
+      let sprintId = null;
+      if (p.sprint_number) {
+        const sprint = await pgQuery(
+          `SELECT id FROM pipeline_sprints WHERE project_id = $1 AND sprint_number = $2`,
+          [proj.rows[0].id, p.sprint_number]
+        );
+        if (sprint.rowCount > 0) sprintId = sprint.rows[0].id;
+      }
+
+      const result = await pgQuery(
+        `INSERT INTO agent_tasks (project_id, sprint_id, task_type, agent_model, prompt, tools_enabled, guardrails)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+        [
+          proj.rows[0].id, sprintId, p.task_type, p.agent_model || null,
+          p.prompt, p.tools_enabled || null,
+          p.guardrails ? JSON.stringify(p.guardrails) : null,
+        ]
+      );
+      return result.rows[0];
+    },
+  },
+
+  list_agent_tasks: {
+    description: "List agent tasks for a project, optionally filtered by status or type.",
+    params: {
+      slug: "Project slug",
+      status: "(optional) Filter: queued|assigned|in_progress|completed|failed|escalated",
+      task_type: "(optional) Filter by type: architect|security|code|review|test|ui",
+      sprint_number: "(optional) Filter by sprint",
+    },
+    handler: async (p) => {
+      const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+
+      let sql = `SELECT at.*, ps.sprint_number, ps.name as sprint_name
+        FROM agent_tasks at
+        LEFT JOIN pipeline_sprints ps ON ps.id = at.sprint_id
+        WHERE at.project_id = $1`;
+      const params: any[] = [proj.rows[0].id];
+      let idx = 2;
+
+      if (p.status) { sql += ` AND at.status = $${idx++}`; params.push(p.status); }
+      if (p.task_type) { sql += ` AND at.task_type = $${idx++}`; params.push(p.task_type); }
+      if (p.sprint_number) { sql += ` AND ps.sprint_number = $${idx++}`; params.push(p.sprint_number); }
+      sql += ` ORDER BY at.created_at ASC`;
+
+      const result = await pgQuery(sql, params);
+      return { slug: p.slug, tasks: result.rows, count: result.rowCount };
+    },
+  },
+
+  update_agent_task: {
+    description: "Update an agent task status, result, or iteration count.",
+    params: {
+      id: "Agent task ID",
+      status: "(optional) New status: queued|assigned|in_progress|completed|failed|escalated",
+      result: "(optional) Result as JSON object",
+      iteration: "(optional) New iteration count",
+    },
+    handler: async (p) => {
+      const fields: string[] = [];
+      const params: any[] = [];
+      let idx = 1;
+
+      if (p.status !== undefined) {
+        fields.push(`status = $${idx++}`);
+        params.push(p.status);
+        if (p.status === "in_progress") fields.push("started_at = NOW()");
+        if (p.status === "completed" || p.status === "failed") fields.push("completed_at = NOW()");
+      }
+      if (p.result !== undefined) { fields.push(`result = $${idx++}`); params.push(JSON.stringify(p.result)); }
+      if (p.iteration !== undefined) { fields.push(`iteration = $${idx++}`); params.push(p.iteration); }
+      if (fields.length === 0) throw new Error("No fields to update");
+
+      params.push(p.id);
+      const sql = `UPDATE agent_tasks SET ${fields.join(", ")} WHERE id = $${idx} RETURNING *`;
+      const result = await pgQuery(sql, params);
+      if (result.rowCount === 0) throw new Error(`Agent task ${p.id} not found`);
+      return result.rows[0];
+    },
+  },
+
+  run_devteam_workflow: {
+    description: "Run a dev-team Dify workflow. Pass async=true to return immediately with a job_id (poll with get_devteam_result). Default: blocking.",
+    params: {
+      workflow: "Workflow name from DIFY_DEVTEAM_KEYS",
+      inputs: "Input variables as object (project_name, research_findings, architecture_design, etc.)",
+      async: "(optional) Set to true to run in background and return job_id immediately",
+    },
+    handler: async (p) => {
+      const apiKey = DIFY_DEVTEAM_KEYS[p.workflow];
+      if (!apiKey) throw new Error(`Unknown dev-team workflow: ${p.workflow}. Available: ${Object.keys(DIFY_DEVTEAM_KEYS).join(", ")}`);
+      if (!apiKey.startsWith("app-")) throw new Error(`Dify API key not configured for workflow: ${p.workflow}`);
+
+      // Async mode: fire and return job_id
+      if (p.async) {
+        const jobId = `job-${++jobCounter}-${Date.now()}`;
+        const job: AsyncJob = { id: jobId, workflow: p.workflow, status: "running", started_at: new Date().toISOString() };
+        asyncJobs.set(jobId, job);
+        log("info", "devteam", p.workflow, `Async job started: ${jobId}`, { inputs_keys: Object.keys(p.inputs || {}) });
+
+        callDify(apiKey, p.inputs || {}, p.workflow).then((difyResponse) => {
+          const data = difyResponse?.data;
+          if (!data || data.status !== "succeeded") {
+            job.status = "failed";
+            job.error = data?.error || "unknown error";
+            job.completed_at = new Date().toISOString();
+            ntfyError("devteam", p.workflow, `Async job ${jobId} failed: ${job.error}`, { workflow: p.workflow });
+          } else {
+            job.status = "succeeded";
+            job.result = data.outputs?.result || data.outputs;
+            job.elapsed_time = data.elapsed_time;
+            job.total_tokens = data.total_tokens;
+            job.completed_at = new Date().toISOString();
+            log("info", "devteam", p.workflow, `Async job ${jobId} succeeded`, { tokens: data.total_tokens, elapsed: data.elapsed_time });
+          }
+        }).catch((e: any) => {
+          job.status = "failed";
+          job.error = e.message;
+          job.completed_at = new Date().toISOString();
+          ntfyError("devteam", p.workflow, `Async job ${jobId} error: ${e.message}`, { workflow: p.workflow });
+        });
+
+        return { job_id: jobId, workflow: p.workflow, status: "running", message: "Workflow started in background. Poll with get_devteam_result." };
+      }
+
+      // Blocking mode (original behavior)
+      const difyResponse = await callDify(apiKey, p.inputs || {}, p.workflow);
+      const data = difyResponse?.data;
+      if (!data || data.status !== "succeeded") {
+        const errMsg = `Dify workflow ${p.workflow} failed: ${data?.error || "unknown error"}`;
+        await ntfyError("devteam", p.workflow, errMsg, {
+          workflow: p.workflow, status: data?.status, error: data?.error,
+        });
+        throw new Error(errMsg);
+      }
+      log("info", "devteam", p.workflow, `Workflow succeeded`, {
+        tokens: data.total_tokens, elapsed: data.elapsed_time,
+      });
+      return {
+        workflow: p.workflow,
+        result: data.outputs?.result || data.outputs,
+        elapsed_time: data.elapsed_time,
+        total_tokens: data.total_tokens,
+      };
+    },
+  },
+
+  get_devteam_result: {
+    description: "Check status/result of an async dev-team workflow job. Returns status (running|succeeded|failed) and result when done.",
+    params: {
+      job_id: "(optional) Specific job ID to check. Omit to list all recent jobs.",
+    },
+    handler: async (p) => {
+      if (p.job_id) {
+        const job = asyncJobs.get(p.job_id);
+        if (!job) throw new Error(`Job '${p.job_id}' not found. Jobs are in-memory and lost on container restart.`);
+        return job;
+      }
+      const jobs = Array.from(asyncJobs.values()).reverse().slice(0, 20);
+      return { jobs, total: asyncJobs.size };
+    },
+  },
+
   // ── Artifacts & Tracking ─────────────────────────────────
 
   add_artifact: {
@@ -811,9 +1422,10 @@ const tools: Record<string, {
 export function registerProjectTools(server: McpServer) {
   server.tool(
     "project_list",
-    "List all available Project Pipeline tools. Manages the full project lifecycle: idea capture, research, " +
-    "async Q&A, sprint planning, time tracking, and metrics. Tools cover: project CRUD (create/list/get/update/advance/archive), " +
-    "research (start/get/update/complete), async questions (add/answer/get_unanswered/get), " +
+    "List all available Project Pipeline tools. Manages the full dev-team automation lifecycle: idea capture, " +
+    "research (13 sections), architecture, security review, planning, building, and completion. Tools cover: " +
+    "project CRUD (create/list/get/update/advance/archive), research (start/get/update/complete), " +
+    "agent tasks (create/list/update/run_devteam_workflow), async questions (add/answer/get_unanswered/get), " +
     "sprints (add/update/start/complete), artifacts (add/list), and tracking (log_event/get_metrics/get_timeline).",
     {},
     async () => {
@@ -843,6 +1455,14 @@ export function registerProjectTools(server: McpServer) {
         const result = await toolDef.handler(params || {});
         return { content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result, null, 2) }] };
       } catch (error: any) {
+        log("error", "call", tool, `Tool failed: ${error.message}`);
+        // Send ntfy for unexpected errors in critical tools
+        const criticalTools = ["advance_stage", "start_research", "run_devteam_workflow", "create_agent_task"];
+        if (criticalTools.includes(tool)) {
+          await ntfyError("call", tool, `Tool ${tool} failed: ${error.message}`, {
+            tool, params: Object.keys(params || {}),
+          });
+        }
         return { content: [{ type: "text", text: JSON.stringify({ error: error.message }) }], isError: true };
       }
     }

@@ -111,7 +111,10 @@ New Neo4j nodes also get an empty `observations: []` array.
 | src/tools/mongodb.ts | MongoDB (databases, collections, documents, indexes, aggregation) | MONGODB_URL |
 | src/tools/recipes.ts | Container recipes (store/deploy/redeploy/teardown/import templates) | VAULT_ADDR, VAULT_TOKEN, DOCKER_HOST |
 | src/tools/blueprints.ts | Blueprint automation system - modular agent framework | (see blueprints config) |
-| src/tools/projects.ts | Project pipeline CRUD - 23 sub-tools for project lifecycle management (projects, research, questions, sprints, artifacts, events, metrics) | NTFY_URL, NTFY_TOPIC, N8N_WEBHOOK_BASE |
+| src/tools/projects.ts | Project pipeline - 30+ sub-tools for dev-team automation (research, architecture, security review, sprints, agent tasks, Dify workflows) | NTFY_URL, NTFY_TOPIC, NTFY_USER, NTFY_PASSWORD, N8N_WEBHOOK_BASE, DIFY_API_BASE, POSTGRES_* |
+| src/tools/figma.ts | Figma design files (read files, components, styles, images, comments) | FIGMA_API_KEY |
+| src/tools/workspaces.ts | Workspace orchestration (GitLab repos, OpenHands coding, Figma QA) | GITLAB_TOKEN, GITLAB_URL, OPENHANDS_API_KEY, FIGMA_API_KEY |
+| src/tools/preferences.ts | Semantic dev preference storage (Qdrant-backed, research pipeline) | QDRANT_URL |
 
 ---
 
@@ -141,6 +144,9 @@ Container names are CASE-SENSITIVE on Docker networks.
 | Traefik | traefik | http://traefik:8080 (API) |
 | Redis | Redis | redis://Redis:6379 |
 | MongoDB | MongoDB | mongodb://MongoDB:27017 |
+| GitLab CE | gitlab-ce | http://gitlab-ce:80 |
+| Figma API | (external) | https://api.figma.com |
+| ntfy | ntfy | http://ntfy:80 |
 
 ---
 

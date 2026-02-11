@@ -430,15 +430,104 @@ Proxies to external MCP servers. Each server defined in `external-mcp.json` gets
 ## projects
 
 **File**: `src/tools/projects.ts`
-**Env vars**: `NTFY_URL`, `NTFY_TOPIC`, `N8N_WEBHOOK_BASE`
+**Env vars**: `NTFY_URL`, `NTFY_TOPIC`, `NTFY_USER`, `NTFY_PASSWORD`, `N8N_WEBHOOK_BASE`, `DIFY_API_BASE`, `POSTGRES_*`
 
-Project pipeline CRUD — 23 sub-tools for full project lifecycle management.
+Project pipeline — 30+ sub-tools for full dev-team automation lifecycle.
 
-Covers:
-- Projects (create, update, list, get, archive)
-- Research items (create, list, update)
-- Questions/decisions (create, list, answer)
-- Sprints (create, list, update, close)
-- Artifacts (create, list, update)
-- Events/timeline (log, list)
-- Metrics and dashboards
+| Sub-tool | Description |
+|----------|-------------|
+| `create_project` | Create a project idea (PG + GitLab sync via n8n) |
+| `list_projects` | List projects with filters (stage, priority, tag) |
+| `get_project` | Full project details + research + sprints + artifacts |
+| `update_project` | Update project fields, sync to GitLab |
+| `advance_stage` | Move to next stage with validation gates |
+| `archive_project` | Soft-archive a project |
+| `start_research` | Launch Dify research pipeline (13 sections, async) |
+| `get_research` | Get all research sections |
+| `update_research` | Update a research section with findings |
+| `complete_research` | Mark research done, store SOW |
+| `add_question` | Post async question (ntfy notification) |
+| `answer_question` | Answer question, auto-resume if unblocked |
+| `get_unanswered` | List unanswered questions (blocking first) |
+| `get_questions` | All questions for a project |
+| `add_sprint` | Add a sprint plan |
+| `update_sprint` | Update sprint fields |
+| `start_sprint` | Set sprint active |
+| `complete_sprint` | Complete sprint, update actuals |
+| `create_agent_task` | Queue agent work item for dev-team |
+| `list_agent_tasks` | List agent tasks with filters |
+| `update_agent_task` | Update agent task status/result |
+| `run_devteam_workflow` | Run Dify dev-team workflow (sync or async) |
+| `get_devteam_result` | Poll async workflow job status |
+| `add_artifact` | Link file/container/service/repo to project |
+| `list_artifacts` | List project artifacts |
+| `log_event` | Log manual event |
+| `get_metrics` | Build analytics and accuracy metrics |
+| `get_timeline` | Event history for a project |
+
+Stages: `queue` → `research` → `architecture` → `security_review` → `planning` → `active` → `completed`
+
+---
+
+## figma
+
+**File**: `src/tools/figma.ts`
+**Env vars**: `FIGMA_API_KEY`
+
+Figma design file access via REST API.
+
+| Sub-tool | Description |
+|----------|-------------|
+| `get_file` | Get Figma file structure (use depth to limit size) |
+| `get_file_nodes` | Get specific nodes by ID |
+| `get_images` | Render nodes as PNG/SVG/JPG/PDF |
+| `get_image_fills` | Get image fill download URLs |
+| `get_comments` | List file comments |
+| `post_comment` | Add a comment to a file |
+| `delete_comment` | Delete a comment |
+| `get_file_versions` | Version history |
+| `get_team_projects` | List team projects |
+| `get_project_files` | List files in a project |
+| `get_file_components` | Published components from a file |
+| `get_file_component_sets` | Component sets (variant groups) |
+| `get_file_styles` | Published styles from a file |
+| `get_team_components` | All published components across team |
+| `get_team_styles` | All published styles across team |
+
+---
+
+## workspace
+
+**File**: `src/tools/workspaces.ts`
+**Env vars**: `GITLAB_TOKEN`, `GITLAB_URL`, `OPENHANDS_API_KEY`, `FIGMA_API_KEY`, `NTFY_USER`, `NTFY_PASSWORD`
+
+Workspace orchestration — GitLab repos, OpenHands coding sessions, Figma visual QA.
+
+| Sub-tool | Description |
+|----------|-------------|
+| `create_workspace` | Create GitLab repo from recipe template |
+| `get_workspace` | Get workspace details from PG |
+| `create_coding_session` | Launch OpenHands agent for a sprint task |
+| `get_session_status` | Check coding session status |
+| `capture_screenshot` | Capture Figma frame as image |
+| `compare_visuals` | Compare Figma design vs implementation screenshot |
+| `merge_sprint` | Merge sprint branch to main |
+| `generate_recipe` | Generate container recipe from workspace |
+
+---
+
+## preferences
+
+**File**: `src/tools/preferences.ts`
+**Env vars**: `QDRANT_URL`
+
+Semantic dev preference storage — Qdrant-backed, used by research pipeline.
+
+| Sub-tool | Description |
+|----------|-------------|
+| `pref_store` | Store a preference with semantic embedding |
+| `pref_search` | Search preferences by similarity |
+| `pref_list` | List all preferences with domain filter |
+| `pref_update` | Update a preference (re-embeds if needed) |
+| `pref_delete` | Delete a preference |
+| `pref_export` | Export all preferences grouped by domain |

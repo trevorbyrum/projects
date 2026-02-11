@@ -26,6 +26,9 @@ import { registerMongodbTools } from "./tools/mongodb.js";
 import { registerRecipeTools } from "./tools/recipes.js";
 import { registerBlueprintTools } from "./tools/blueprints.js";
 import { registerProjectTools } from "./tools/projects.js";
+import { registerFigmaTools } from "./tools/figma.js";
+import { registerWorkspaceTools } from "./tools/workspaces.js";
+import { registerPreferenceTools } from "./tools/preferences.js";
 
 const PORT = parseInt(process.env.PORT || "3500");
 
@@ -59,6 +62,9 @@ function createMcpServer(): McpServer {
   registerRecipeTools(server);
   registerBlueprintTools(server);
   registerProjectTools(server);
+  registerFigmaTools(server);
+  registerWorkspaceTools(server);
+  registerPreferenceTools(server);
 
   // External MCP proxies (loaded from config)
   registerExternalTools(server);
@@ -125,8 +131,29 @@ app.all("/", async (req, res) => {
       }
     };
   } else if (sessionId && !sessions.has(sessionId)) {
-    res.status(400).json({ jsonrpc: "2.0", error: { code: -32001, message: "Session not found" }, id: null });
-    return;
+    // Auto-recover: stale session (e.g. after container restart)
+    console.log(`Session ${sessionId} not found — auto-recovering`);
+    const server = createMcpServer();
+    transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => sessionId!,
+    });
+    await server.connect(transport);
+    transport.onclose = () => {
+      const sid = (transport as any).sessionId;
+      if (sid) {
+        sessions.delete(sid);
+        console.log(`Session closed: ${sid}`);
+      }
+    };
+
+    // Force-initialize the REAL transport (WebStandardStreamableHTTPServerTransport)
+    // StreamableHTTPServerTransport is just a Node.js wrapper — _initialized lives on _webStandardTransport
+    const webTransport = (transport as any)._webStandardTransport;
+    webTransport._initialized = true;
+    webTransport.sessionId = sessionId;
+
+    sessions.set(sessionId, { transport, server });
+    console.log(`Session auto-recovered: ${sessionId}`);
   } else {
     res.status(400).json({ jsonrpc: "2.0", error: { code: -32600, message: "Invalid Request" }, id: null });
     return;

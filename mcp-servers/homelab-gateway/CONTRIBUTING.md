@@ -59,3 +59,6 @@ The 3 labels above are all that are needed.
 | Traefik | traefik | http://traefik:8080 (API) |
 | Redis | Redis | redis://Redis:6379 |
 | MongoDB | MongoDB | mongodb://MongoDB:27017 |
+| GitLab CE | gitlab-ce | http://gitlab-ce:80 |
+| Figma | (external API) | https://api.figma.com |
+| ntfy | ntfy | http://ntfy:80 |
