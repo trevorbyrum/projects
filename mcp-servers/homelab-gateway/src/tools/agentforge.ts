@@ -1160,7 +1160,7 @@ Output ONLY the JSON object.`;
           mode: appConfig.mode || "workflow",
           description: appConfig.description || "",
           icon_type: "emoji",
-          icon: appConfig.icon || "\u{1F916}",
+          icon: appConfig.icon || "🤖",
           icon_background: "#FFEAD5",
         }),
       });
@@ -1323,14 +1323,14 @@ Output ONLY the JSON array.`;
 
       // Step 5: HitL Notification
       const notification = [
-        `Project: ${project.name}`,
-        `Reusable prompts: ${reusablePrompts.length} (${reusablePrompts.map((p: any) => p.name).join(", ") || "none"})`,
-        `New tools: ${newTools.length} (${newTools.map((t: any) => t.name).join(", ") || "none"})`,
-        `LightRAG: ${lightragRecommended ? "YES" : "No"} (score: ${lightragScore}/4)`,
-        `Prompts to create: ${gapCount}`,
-        `Est. cost: $${estimatedCost.toFixed(2)}`,
+        `📋 Project: ${project.name}`,
+        `✅ Reusable prompts: ${reusablePrompts.length} (${reusablePrompts.map((p: any) => p.name).join(", ") || "none"})`,
+        `🆕 New tools: ${newTools.length} (${newTools.map((t: any) => t.name).join(", ") || "none"})`,
+        `🕸️ LightRAG: ${lightragRecommended ? "YES" : "No"} (score: ${lightragScore}/4)`,
+        `📝 Prompts to create: ${gapCount}`,
+        `💰 Est. cost: $${estimatedCost.toFixed(2)}`,
         "",
-        "Awaiting approval...",
+        "⏳ Awaiting approval...",
       ].join("\n");
 
       await ntfyNotify(notification, "Resource Evaluation", 4, ["clipboard"]);
@@ -1570,3 +1570,4 @@ export function registerAgentforgeTools(server: McpServer) {
     }
   );
 }
+

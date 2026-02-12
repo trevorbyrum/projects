@@ -588,7 +588,7 @@ const tools: Record<string, {
   },
 };
 
-// -- Exported helpers for projects.ts pipeline integration --------------------
+// ── Exported helpers for projects.ts pipeline integration ─────────
 
 /**
  * Create a workspace DB record for a project.
@@ -636,7 +636,7 @@ export async function mergeSprintDirect(slug: string, sourceBranch: string, targ
  * Reads the diff from sandbox branch vs main, then batch-commits all files to the production repo.
  */
 export async function promoteCodeToProjectRepo(
-  slug: string, sandboxBranch: string, targetBranch: string
+  slug: string, sandboxBranch: string, targetBranch: string, baseBranch?: string
 ): Promise<{ success: boolean; message: string }> {
   const SANDBOX_REPO = process.env.OPENHANDS_SANDBOX_REPO || "homelab-projects/openhands-sandbox";
   const encodedSandbox = encodeURIComponent(SANDBOX_REPO);
@@ -644,7 +644,7 @@ export async function promoteCodeToProjectRepo(
 
   // Get the diff between the sandbox branch and main (captures this sprint's changes)
   const compare = await gitlabFetch(
-    `/api/v4/projects/${encodedSandbox}/repository/compare?from=main&to=${encodeURIComponent(sandboxBranch)}`
+    `/api/v4/projects/${encodedSandbox}/repository/compare?from=${encodeURIComponent(baseBranch || "main")}&to=${encodeURIComponent(sandboxBranch)}`
   );
 
   // Build commit actions from the diff
@@ -756,3 +756,4 @@ export function registerWorkspaceTools(server: McpServer) {
     }
   );
 }
+

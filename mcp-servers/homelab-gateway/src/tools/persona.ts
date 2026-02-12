@@ -3,7 +3,7 @@ import { z } from "zod";
 import pg from "pg";
 import { getEmbedding } from "../utils/embeddings.js";
 import { searchPreferences } from "./preferences.js";
-import { notify, notifyError } from "../utils/notify.js";
+import { mmAlert, mmPost } from "./mm-notify.js";
 
 const { Pool } = pg;
 
@@ -75,11 +75,15 @@ function log(level: "info" | "warn" | "error", module: string, op: string, msg: 
   else console.log(`${prefix} ${msg}${metaStr}`);
 }
 
-const ntfyNotify = notify;
+async function ntfyNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
+  const emoji = tags?.length ? `:${tags[0]}: ` : "";
+  const titleStr = title ? `**${emoji}${title}**\n` : "";
+  await mmPost("dev-logs", `${titleStr}${message}`);
+}
 
 async function ntfyError(module: string, op: string, error: string, meta?: Record<string, any>) {
   log("error", module, op, error, meta);
-  await notifyError(module, op, error, meta);
+  await mmAlert(module, op, error, meta);
 }
 
 // --- Qdrant helpers ---
@@ -1065,3 +1069,4 @@ export function registerPersonaTools(server: McpServer) {
     }
   );
 }
+

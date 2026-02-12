@@ -219,3 +219,4 @@ app.use((req, res) => res.status(404).type("text/plain").send("Not found"));
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`MCP Gateway running on port ${PORT}`);
 });
+
