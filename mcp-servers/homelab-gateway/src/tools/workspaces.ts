@@ -3,6 +3,7 @@ import { z } from "zod";
 import pg from "pg";
 import { chromium } from "playwright";
 import { stat } from "fs/promises";
+import { mmAlert, mmPost } from "./mm-notify.js";
 
 const { Pool } = pg;
 
@@ -22,11 +23,6 @@ const GITLAB_TOKEN = process.env.GITLAB_TOKEN || process.env.GITHUB_TOKEN || "";
 
 const FIGMA_API_KEY = process.env.FIGMA_API_KEY || "";
 
-const NTFY_URL = process.env.NTFY_URL || "http://ntfy:80";
-const NTFY_TOPIC = process.env.NTFY_TOPIC || "homelab-projects";
-const NTFY_USER = process.env.NTFY_USER || "";
-const NTFY_PASSWORD = process.env.NTFY_PASSWORD || "";
-
 // -- Structured Logging --
 
 function log(level: "info" | "warn" | "error", module: string, op: string, msg: string, meta?: Record<string, any>) {
@@ -42,23 +38,15 @@ function log(level: "info" | "warn" | "error", module: string, op: string, msg: 
   }
 }
 
-async function ntfyNotify(message: string, title?: string, priority?: number, tags?: string[]): Promise<void> {
-  try {
-    const headers: Record<string, string> = {};
-    if (NTFY_USER && NTFY_PASSWORD) headers["Authorization"] = "Basic " + Buffer.from(`${NTFY_USER}:${NTFY_PASSWORD}`).toString("base64");
-    if (title) headers["Title"] = title;
-    if (priority) headers["Priority"] = String(priority);
-    if (tags?.length) headers["Tags"] = tags.join(",");
-    await fetch(`${NTFY_URL}/${NTFY_TOPIC}`, { method: "POST", body: message, headers });
-  } catch (e: any) {
-    console.error("ntfy notification failed:", e.message);
-  }
+async function ntfyNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
+  const emoji = tags?.length ? `:${tags[0]}: ` : "";
+  const titleStr = title ? `**${emoji}${title}**\n` : "";
+  await mmPost("dev-logs", `${titleStr}${message}`);
 }
 
 async function ntfyError(module: string, op: string, error: string, meta?: Record<string, any>) {
-  const details = meta ? "\n" + JSON.stringify(meta, null, 2) : "";
   log("error", module, op, error, meta);
-  await ntfyNotify(`[workspaces/${module}/${op}] ${error}${details}`, "Workspace Error", 5, ["rotating_light"]);
+  await mmAlert(module, op, error, meta);
 }
 
 
@@ -91,9 +79,9 @@ async function pgQuery(sql: string, params: any[] = []): Promise<any> {
   }
 }
 
-// --- GitLab API helper ---
+// --- GitLab API helper (exported for use by projects.ts) ---
 
-async function gitlabFetch(path: string, options: RequestInit = {}): Promise<any> {
+export async function gitlabFetch(path: string, options: RequestInit = {}): Promise<any> {
   const startTime = Date.now();
   const method = (options.method || "GET").toUpperCase();
   log("info", "gitlab", "fetch", `${method} ${path}`);
@@ -130,9 +118,9 @@ async function gitlabFetch(path: string, options: RequestInit = {}): Promise<any
   }
 }
 
-// --- OpenHands API helper ---
+// --- OpenHands API helper (exported for use by projects.ts) ---
 
-async function ohFetch(path: string, options: RequestInit = {}): Promise<any> {
+export async function ohFetch(path: string, options: RequestInit = {}): Promise<any> {
   const startTime = Date.now();
   const method = (options.method || "GET").toUpperCase();
   log("info", "openhands", "fetch", `${method} ${path}`);
@@ -187,6 +175,7 @@ const tools: Record<string, {
       slug: "Project slug (required). Used for repo name, directory name, and pipeline_projects lookup.",
       figma_file_key: "(optional) Figma file key to link to the workspace.",
       gitlab_group_id: "(optional) GitLab group/namespace ID for the repo. Default: 34 (Homelab Projects).",
+      repository: "(optional) Override repo URL instead of creating a new GitLab repo.",
     },
     handler: async (p) => {
       if (!p.slug) throw new Error("slug is required");
@@ -204,17 +193,30 @@ const tools: Record<string, {
       }
       const project = projRes.rows[0];
 
-      const repo = await gitlabFetch("/api/v4/projects", {
-        method: "POST",
-        body: JSON.stringify({
-          name: slug,
-          path: slug,
-          namespace_id: groupId,
-          visibility: "private",
-          initialize_with_readme: true,
-          description: `Workspace repo for ${project.name}`,
-        }),
-      });
+      let repoUrl: string;
+      let repoWebUrl: string;
+      let repoId: number | null = null;
+
+      if (p.repository) {
+        // Use provided repo URL (e.g. sandbox repo) — skip creating a new GitLab repo
+        repoUrl = p.repository;
+        repoWebUrl = p.repository;
+      } else {
+        const repo = await gitlabFetch("/api/v4/projects", {
+          method: "POST",
+          body: JSON.stringify({
+            name: slug,
+            path: slug,
+            namespace_id: groupId,
+            visibility: "private",
+            initialize_with_readme: true,
+            description: `Workspace repo for ${project.name}`,
+          }),
+        });
+        repoUrl = repo.http_url_to_repo;
+        repoWebUrl = repo.web_url;
+        repoId = repo.id;
+      }
 
       const workspacePath = `/mnt/user/appdata/projects/${slug}`;
 
@@ -227,23 +229,23 @@ const tools: Record<string, {
            figma_file_key = COALESCE(EXCLUDED.figma_file_key, project_workspaces.figma_file_key),
            workspace_path = EXCLUDED.workspace_path
          RETURNING *`,
-        [project.id, repo.http_url_to_repo, p.figma_file_key || null, workspacePath]
+        [project.id, repoUrl, p.figma_file_key || null, workspacePath]
       );
 
       log("info", "workspace", "create", `Workspace created for ${slug}`, {
-        gitlab_id: repo.id, workspace_path: workspacePath,
+        gitlab_id: repoId, workspace_path: workspacePath,
       });
       await ntfyNotify(
-        `Workspace created: ${slug}\nGitLab: ${repo.web_url}\nPath: ${workspacePath}`,
+        `Workspace created: ${slug}\nGitLab: ${repoWebUrl}\nPath: ${workspacePath}`,
         "Workspace Created", 3, ["file_folder"]
       );
 
       return {
         workspace: insertRes.rows[0],
         gitlab: {
-          id: repo.id,
-          url: repo.http_url_to_repo,
-          web_url: repo.web_url,
+          id: repoId,
+          url: repoUrl,
+          web_url: repoWebUrl,
         },
         filesystem: {
           path: workspacePath,
@@ -287,6 +289,7 @@ const tools: Record<string, {
       prompt: "The task prompt for the agent (required)",
       repository: "(optional) Git repo URL. Defaults to the workspace's gitlab_repo_url.",
       conversation_instructions: "(optional) System-level instructions for the agent",
+      branch: "(optional) Git branch to work on. Defaults to workspace branch.",
     },
     handler: async (p) => {
       if (!p.slug) throw new Error("slug is required");
@@ -315,7 +318,8 @@ const tools: Record<string, {
         initial_user_msg: p.prompt,
       };
       if (repoUrl) body.repository = repoUrl;
-      if (ws.gitlab_branch) body.selected_branch = ws.gitlab_branch;
+      // Branch priority: explicit param > workspace branch > default
+      body.selected_branch = p.branch || ws.gitlab_branch || "main";
       if (p.conversation_instructions) body.conversation_instructions = p.conversation_instructions;
 
       const conv = await ohFetch("/api/conversations", {
@@ -339,10 +343,10 @@ const tools: Record<string, {
       );
 
       log("info", "session", "create", `Coding session created for ${p.slug} sprint #${p.sprint_number}`, {
-        conversation_id: conversationId, workspace_id: ws.id, sprint_id: sprint.id,
+        conversation_id: conversationId, workspace_id: ws.id, sprint_id: sprint.id, branch: body.selected_branch,
       });
       await ntfyNotify(
-        `Coding session started: ${p.slug} sprint #${p.sprint_number}\nConversation: ${conversationId}`,
+        `Coding session started: ${p.slug} sprint #${p.sprint_number}\nConversation: ${conversationId}\nBranch: ${body.selected_branch}`,
         "Coding Session Started", 3, ["computer"]
       );
 
@@ -351,6 +355,7 @@ const tools: Record<string, {
         conversation: conv,
         workspace_id: ws.id,
         sprint_id: sprint.id,
+        branch: body.selected_branch,
       };
     },
   },
@@ -455,22 +460,15 @@ const tools: Record<string, {
     params: {
       slug: "Project slug (required)",
       source_branch: "Branch to merge into main (required)",
+      target_repo: "(optional) GitLab project path. Defaults to homelab-projects/{slug}.",
     },
     handler: async (p) => {
       if (!p.slug) throw new Error("slug is required");
       if (!p.source_branch) throw new Error("source_branch is required");
       if (!GITLAB_TOKEN) throw new Error("GITLAB_TOKEN not configured");
 
-      const wsRes = await pgQuery(
-        `SELECT w.gitlab_repo_url
-         FROM project_workspaces w
-         JOIN pipeline_projects pp ON pp.id = w.project_id
-         WHERE pp.slug = $1`,
-        [p.slug]
-      );
-      if (wsRes.rows.length === 0) throw new Error(`No workspace for slug: ${p.slug}`);
-
-      const encodedPath = encodeURIComponent(`homelab-projects/${p.slug}`);
+      const repoPath = p.target_repo || `homelab-projects/${p.slug}`;
+      const encodedPath = encodeURIComponent(repoPath);
       const glProject = await gitlabFetch(`/api/v4/projects/${encodedPath}`);
 
       const mr = await gitlabFetch(`/api/v4/projects/${glProject.id}/merge_requests`, {
@@ -479,7 +477,7 @@ const tools: Record<string, {
           source_branch: p.source_branch,
           target_branch: "main",
           title: `Merge ${p.source_branch} into main`,
-          remove_source_branch: true,
+          remove_source_branch: false, // Keep for audit trail
         }),
       });
 
@@ -523,7 +521,7 @@ const tools: Record<string, {
       if (!p.slug) throw new Error("slug is required");
 
       const wsRes = await pgQuery(
-        `SELECT w.*, pp.name, pp.slug, pp.description, pp.tech_stack
+        `SELECT w.*, pp.name, pp.slug, pp.description, pp.scope_of_work
          FROM project_workspaces w
          JOIN pipeline_projects pp ON pp.id = w.project_id
          WHERE pp.slug = $1`,
@@ -533,7 +531,7 @@ const tools: Record<string, {
       const ws = wsRes.rows[0];
 
       const sprintRes = await pgQuery(
-        `SELECT sprint_number, title, status, deliverables
+        `SELECT sprint_number, name, status, tasks
          FROM pipeline_sprints
          WHERE project_id = $1 ORDER BY sprint_number`,
         [ws.project_id]
@@ -547,6 +545,8 @@ const tools: Record<string, {
         [ws.project_id]
       );
 
+      const techStack = ws.scope_of_work?.tech_stack || {};
+
       const recipe = {
         name: ws.name,
         slug: ws.slug,
@@ -556,7 +556,7 @@ const tools: Record<string, {
           repo_url: ws.gitlab_repo_url,
           branch: ws.gitlab_branch,
         },
-        tech_stack: ws.tech_stack,
+        tech_stack: techStack,
         container: {
           image: `registry.your-domain.com/${ws.slug}:latest`,
           ports: [],
@@ -587,6 +587,123 @@ const tools: Record<string, {
     },
   },
 };
+
+// -- Exported helpers for projects.ts pipeline integration --------------------
+
+/**
+ * Create a workspace DB record for a project.
+ * If repoOverride is given, uses that repo URL instead of creating a new GitLab repo.
+ */
+export async function createWorkspaceDirect(slug: string, name: string, repoOverride?: string): Promise<any> {
+  return tools.create_workspace.handler({
+    slug,
+    ...(repoOverride ? { repository: repoOverride } : {}),
+  });
+}
+
+/**
+ * Create an OpenHands coding session for a sprint.
+ */
+export async function createCodingSessionDirect(
+  slug: string, sprintNumber: number, prompt: string,
+  instructions?: string, branch?: string
+): Promise<any> {
+  return tools.create_coding_session.handler({
+    slug,
+    sprint_number: sprintNumber,
+    prompt,
+    conversation_instructions: instructions,
+    branch,
+  });
+}
+
+/**
+ * Get OpenHands conversation status.
+ */
+export async function getConversationStatus(conversationId: string): Promise<any> {
+  return tools.get_session_status.handler({ conversation_id: conversationId });
+}
+
+/**
+ * Merge a sprint branch to main in a GitLab repo.
+ */
+export async function mergeSprintDirect(slug: string, sourceBranch: string, targetRepo?: string): Promise<any> {
+  return tools.merge_sprint.handler({ slug, source_branch: sourceBranch, target_repo: targetRepo });
+}
+
+/**
+ * Promote code from sandbox repo to production repo.
+ * Reads the diff from sandbox branch vs main, then batch-commits all files to the production repo.
+ */
+export async function promoteCodeToProjectRepo(
+  slug: string, sandboxBranch: string, targetBranch: string
+): Promise<{ success: boolean; message: string }> {
+  const SANDBOX_REPO = process.env.OPENHANDS_SANDBOX_REPO || "homelab-projects/openhands-sandbox";
+  const encodedSandbox = encodeURIComponent(SANDBOX_REPO);
+  const encodedProject = encodeURIComponent(`homelab-projects/${slug}`);
+
+  // Get the diff between the sandbox branch and main (captures this sprint's changes)
+  const compare = await gitlabFetch(
+    `/api/v4/projects/${encodedSandbox}/repository/compare?from=main&to=${encodeURIComponent(sandboxBranch)}`
+  );
+
+  // Build commit actions from the diff
+  const actions: any[] = [];
+  for (const diff of compare.diffs || []) {
+    if (diff.deleted_file) {
+      actions.push({ action: "delete", file_path: diff.new_path });
+    } else {
+      // Fetch the raw file content from sandbox branch
+      const fileContent = await gitlabFetch(
+        `/api/v4/projects/${encodedSandbox}/repository/files/${encodeURIComponent(diff.new_path)}/raw?ref=${encodeURIComponent(sandboxBranch)}`
+      );
+      const content = typeof fileContent === "string" ? fileContent : JSON.stringify(fileContent);
+
+      // Check if file exists in target repo to decide create vs update
+      let fileExists = false;
+      try {
+        await gitlabFetch(`/api/v4/projects/${encodedProject}/repository/files/${encodeURIComponent(diff.new_path)}?ref=${targetBranch}`);
+        fileExists = true;
+      } catch {
+        // Check on main too
+        try {
+          await gitlabFetch(`/api/v4/projects/${encodedProject}/repository/files/${encodeURIComponent(diff.new_path)}?ref=main`);
+          fileExists = true;
+        } catch { /* doesn't exist anywhere */ }
+      }
+
+      actions.push({
+        action: fileExists ? "update" : "create",
+        file_path: diff.new_path,
+        content,
+        encoding: "text",
+      });
+    }
+  }
+
+  if (actions.length === 0) return { success: true, message: "No files to promote" };
+
+  // Ensure target branch exists in production repo (create from main if not)
+  try {
+    await gitlabFetch(`/api/v4/projects/${encodedProject}/repository/branches`, {
+      method: "POST",
+      body: JSON.stringify({ branch: targetBranch, ref: "main" }),
+    });
+  } catch { /* branch may already exist */ }
+
+  // Batch commit all files to production repo
+  await gitlabFetch(`/api/v4/projects/${encodedProject}/repository/commits`, {
+    method: "POST",
+    body: JSON.stringify({
+      branch: targetBranch,
+      commit_message: `Promote sprint from sandbox (${sandboxBranch})\n\nFiles: ${actions.length}`,
+      actions,
+    }),
+  });
+
+  log("info", "promote", "code", `Promoted ${actions.length} files from ${sandboxBranch} to ${slug}/${targetBranch}`);
+  return { success: true, message: `Promoted ${actions.length} files to ${slug}/${targetBranch}` };
+}
 
 // --- Registration ---
 

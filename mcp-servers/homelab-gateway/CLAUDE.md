@@ -115,6 +115,7 @@ New Neo4j nodes also get an empty `observations: []` array.
 | src/tools/figma.ts | Figma design files (read files, components, styles, images, comments) | FIGMA_API_KEY |
 | src/tools/workspaces.ts | Workspace orchestration (GitLab repos, OpenHands coding, Figma QA) | GITLAB_TOKEN, GITLAB_URL, OPENHANDS_API_KEY, FIGMA_API_KEY |
 | src/tools/preferences.ts | Semantic dev preference storage (Qdrant-backed, research pipeline) | QDRANT_URL |
+| src/tools/agentforge.ts | AgentForge: automated agent research, KG construction, prompt optimization, Dify scaffolding | OPENROUTER_API_KEY, NEO4J_*, POSTGRES_*, DIFY_*, NTFY_* |
 
 ---
 

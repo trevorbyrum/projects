@@ -224,7 +224,35 @@ const tools: Record<string, { description: string; params: Record<string, string
   },
 };
 
-// Exported for direct use by projects.ts (no MCP overhead)
+// Exported for direct use by other modules (no MCP overhead)
+export async function storePreference(pref: {
+  domain: string; topic: string; context: string; preference: string;
+  anti_pattern?: string; confidence?: string; source?: string; tags?: string[];
+}): Promise<{ id: string }> {
+  await ensureCollection();
+  const embeddingText = [pref.domain, pref.topic, pref.context, pref.preference].filter(Boolean).join(" ");
+  const embedding = await getEmbedding(embeddingText);
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+
+  await qdrantFetch(`/collections/${COLLECTION_NAME}/points`, {
+    method: "PUT",
+    body: JSON.stringify({
+      points: [{
+        id, vector: embedding,
+        payload: {
+          domain: pref.domain, topic: pref.topic, context: pref.context,
+          preference: pref.preference, anti_pattern: pref.anti_pattern || null,
+          examples: null, confidence: pref.confidence || "high",
+          source: pref.source || "persona-digest", tags: pref.tags || [],
+          created_at: now, updated_at: now,
+        },
+      }],
+    }),
+  });
+  return { id };
+}
+
 export async function searchPreferences(query: string, limit: number = 5, domain?: string): Promise<any[]> {
   await ensureCollection();
   const embedding = await getEmbedding(query);

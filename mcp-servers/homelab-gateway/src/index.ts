@@ -25,10 +25,13 @@ import { registerRedisTools } from "./tools/redis.js";
 import { registerMongodbTools } from "./tools/mongodb.js";
 import { registerRecipeTools } from "./tools/recipes.js";
 import { registerBlueprintTools } from "./tools/blueprints.js";
-import { registerProjectTools } from "./tools/projects.js";
+import { registerProjectTools, handleReviewAction } from "./tools/projects.js";
 import { registerFigmaTools } from "./tools/figma.js";
 import { registerWorkspaceTools } from "./tools/workspaces.js";
 import { registerPreferenceTools } from "./tools/preferences.js";
+import { registerPersonaTools } from "./tools/persona.js";
+import { registerAgentforgeTools } from "./tools/agentforge.js";
+import { registerWarRoomTools } from "./tools/war-room.js";
 
 const PORT = parseInt(process.env.PORT || "3500");
 
@@ -65,6 +68,9 @@ function createMcpServer(): McpServer {
   registerFigmaTools(server);
   registerWorkspaceTools(server);
   registerPreferenceTools(server);
+  registerPersonaTools(server);
+  registerAgentforgeTools(server);
+  registerWarRoomTools(server);
 
   // External MCP proxies (loaded from config)
   registerExternalTools(server);
@@ -85,6 +91,40 @@ function setCorsHeaders(res: express.Response) {
   res.setHeader("Access-Control-Expose-Headers", "mcp-session-id");
   res.setHeader("Access-Control-Max-Age", "86400");
 }
+
+// -- Mattermost Slash Command Webhook ------------------------------------------
+app.post("/webhook/mattermost", async (req, res) => {
+  try {
+    // Mattermost sends slash command data as form-urlencoded
+    const { command, text, user_name, channel_id, token } = req.body;
+
+    // Validate Mattermost slash command token if configured
+    const MM_SLASH_TOKEN = process.env.MM_SLASH_COMMAND_TOKEN || "";
+    if (MM_SLASH_TOKEN && token !== MM_SLASH_TOKEN) {
+      return res.status(401).json({ text: "Unauthorized" });
+    }
+
+    if (command === "/pipeline") {
+      const parts = (text || "").trim().split(/\s+/);
+      const action = parts[0] || "help";
+      const taskId = parts[1] || "";
+      const reason = parts.slice(2).join(" ");
+
+      const result = await handleReviewAction(action, taskId, reason, user_name || "unknown");
+      return res.json({ response_type: "in_channel", text: result });
+    }
+
+    res.json({ text: "Unknown command. Use `/pipeline approve|reject|retry|list`." });
+  } catch (e: any) {
+    console.error("[webhook/mattermost] Error:", e.message);
+    res.json({ text: `Error: ${e.message}` });
+  }
+});
+
+// -- Health Check --------------------------------------------------------------
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok", sessions: sessions.size, uptime: process.uptime() });
+});
 
 app.all("/", async (req, res) => {
   setCorsHeaders(res);

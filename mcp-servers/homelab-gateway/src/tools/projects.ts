@@ -2,6 +2,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import pg from "pg";
 import { searchPreferences } from "./preferences.js";
+import { gitlabFetch, createWorkspaceDirect, createCodingSessionDirect, mergeSprintDirect, promoteCodeToProjectRepo, getConversationStatus } from "./workspaces.js";
+import { startAndRunWarRoom } from "./war-room.js";
+import { mmAlert, mmPipelineUpdate, mmDeliverable, mmPostWithId, mmUpdatePost, mmPost } from "./mm-notify.js";
 
 const { Pool } = pg;
 
@@ -10,27 +13,19 @@ const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || "5432");
 const POSTGRES_USER = process.env.POSTGRES_USER || "";
 const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || "";
 const POSTGRES_DB = process.env.POSTGRES_DB || "";
-const NTFY_URL = process.env.NTFY_URL || "http://ntfy:80";
-const NTFY_TOPIC = process.env.NTFY_TOPIC || "homelab-projects";
-const NTFY_USER = process.env.NTFY_USER || "";
-const NTFY_PASSWORD = process.env.NTFY_PASSWORD || "";
 const N8N_WEBHOOK_BASE = process.env.N8N_WEBHOOK_BASE || "http://n8n:5678/webhook";
 
 // n8n 2.4.6 webhook URLs include workflowId prefix: /webhook/{workflowId}/webhook/{path}
 const N8N_WEBHOOK_IDS: Record<string, string> = {
-  "project-gitlab-sync": "",
-  "project-research-pipeline": "",
-  "project-research-resume": "",
+  "project-gitlab-sync": "your-webhook-id",
+  "project-research-pipeline": "your-webhook-id",
+  "project-research-resume": "your-webhook-id",
   "dev-team-orchestrator": "",  // path-only webhook format (API-created)
-  "dev-team-architecture": "",  // path-only webhook format (API-created)
-  "dev-team-planning": "",        // path-only webhook format (API-created)
-  "dev-team-sprint-runner": "",  // path-only webhook format (API-created)
-  "dev-team-review-loop": "",    // path-only webhook format (API-created)
 };
 
 let pool: pg.Pool | null = null;
 
-// ── Async Workflow Job Store ────────────────────────────────
+// -- Async Workflow Job Store -------------------------------------------------
 interface AsyncJob {
   id: string;
   workflow: string;
@@ -70,22 +65,7 @@ async function pgQuery(sql: string, params: any[] = []): Promise<any> {
   }
 }
 
-async function ntfyNotify(message: string, title?: string, priority?: number, tags?: string[]): Promise<void> {
-  try {
-    const headers: Record<string, string> = {};
-    if (NTFY_USER && NTFY_PASSWORD) headers["Authorization"] = "Basic " + Buffer.from(`${NTFY_USER}:${NTFY_PASSWORD}`).toString("base64");
-    if (title) headers["Title"] = title;
-    if (priority) headers["Priority"] = String(priority);
-    if (tags?.length) headers["Tags"] = tags.join(",");
-    await fetch(`${NTFY_URL}/${NTFY_TOPIC}`, {
-      method: "POST",
-      body: message,
-      headers,
-    });
-  } catch (e: any) {
-    console.error("ntfy notification failed:", e.message);
-  }
-}
+
 
 async function triggerN8n(webhookPath: string, data: Record<string, any>): Promise<any> {
   const startTime = Date.now();
@@ -155,7 +135,7 @@ const SECTION_PREF_QUERIES: Record<string, string> = {
   "prior-art":        "prior art similar projects inspiration",
 };
 
-// ── Structured Logging ──────────────────────────────────────
+// -- Structured Logging -------------------------------------------------------
 
 function log(level: "info" | "warn" | "error", module: string, op: string, msg: string, meta?: Record<string, any>) {
   const ts = new Date().toISOString();
@@ -170,54 +150,50 @@ function log(level: "info" | "warn" | "error", module: string, op: string, msg: 
   }
 }
 
+async function ntfyNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
+  const emoji = tags?.length ? `:${tags[0]}: ` : "";
+  const titleStr = title ? `**${emoji}${title}**\n` : "";
+  await mmPost("dev-logs", `${titleStr}${message}`);
+}
+
 async function ntfyError(module: string, op: string, error: string, meta?: Record<string, any>) {
-  const details = meta ? "\n" + JSON.stringify(meta, null, 2) : "";
   log("error", module, op, error, meta);
-  await ntfyNotify(
-    `[${module}/${op}] ${error}${details}`,
-    "Pipeline Error",
-    5,
-    ["rotating_light"]
-  );
+  await mmAlert(module, op, error, meta);
 }
 
 async function ntfyWarn(module: string, op: string, message: string, meta?: Record<string, any>) {
-  const details = meta ? "\n" + JSON.stringify(meta, null, 2) : "";
   log("warn", module, op, message, meta);
-  await ntfyNotify(
-    `[${module}/${op}] ${message}${details}`,
-    "Pipeline Warning",
-    4,
-    ["warning"]
-  );
+  const metaStr = meta ? "\n```json\n" + JSON.stringify(meta, null, 2) + "\n```" : "";
+  await mmPost("alerts", `#### :warning: Warning in \`${module}.${op}\`\n${message}${metaStr}`);
 }
 
 
 // Dify workflow API keys per research section
 const DIFY_SECTION_KEYS: Record<string, string> = {
-  "libraries":         "app-YOUR_SECTION_KEY",
-  "architecture":      "app-YOUR_SECTION_KEY",
-  "security":          "app-YOUR_SECTION_KEY",
-  "dependencies":      "app-YOUR_SECTION_KEY",
-  "file-structure":    "app-YOUR_SECTION_KEY",
-  "tools":             "app-YOUR_SECTION_KEY",
-  "containers":        "app-YOUR_SECTION_KEY",
-  "integration":       "app-YOUR_SECTION_KEY",
-  "costs":             "app-YOUR_SECTION_KEY",
-  "open-source-scan":  "app-YOUR_SECTION_KEY",
-  "best-practices":    "app-YOUR_SECTION_KEY",
-  "ui-ux-research":    "app-YOUR_SECTION_KEY",
-  "prior-art":         "app-YOUR_SECTION_KEY",
+  "libraries":         "your-dify-key",
+  "architecture":      "your-dify-key",
+  "security":          "your-dify-key",
+  "dependencies":      "your-dify-key",
+  "file-structure":    "your-dify-key",
+  "tools":             "your-dify-key",
+  "containers":        "your-dify-key",
+  "integration":       "your-dify-key",
+  "costs":             "your-dify-key",
+  "open-source-scan":  "your-dify-key",
+  "best-practices":    "your-dify-key",
+  "ui-ux-research":    "your-dify-key",
+  "prior-art":         "your-dify-key",
 };
 
 // Dev-team Dify workflow API keys
 const DIFY_DEVTEAM_KEYS: Record<string, string> = {
-  "architect-design":        "app-YOUR_DEVTEAM_KEY",
-  "architect-revise":        "app-YOUR_DEVTEAM_KEY",
-  "security-review":         "app-YOUR_DEVTEAM_KEY",
-  "pm-generate-sow":         "app-YOUR_DEVTEAM_KEY",
-  "pm-generate-task-prompts":"app-YOUR_DEVTEAM_KEY",
-  "code-reviewer":           "app-YOUR_DEVTEAM_KEY",
+  "architect-design":        "your-dify-key",
+  "architect-revise":        "your-dify-key",
+  "security-review":         "your-dify-key",
+  "pm-generate-sow":         "your-dify-key",
+  "pm-generate-task-prompts":"your-dify-key",
+  "code-reviewer":           "your-dify-key",
+  "focused-research":        "your-dify-key",
 };
 
 const DIFY_API_BASE = process.env.DIFY_API_BASE || "http://dify-api:5001";
@@ -465,6 +441,337 @@ async function runResearchPipeline(project: { id: number; slug: string; name: st
   log("info", "research", "pipeline", `Pipeline finished for ${project.slug}: ${completedCount}/${totalSections} succeeded`);
 }
 
+
+// -- Sandbox + Workspace Auto-Creation ----------------------------------------
+
+const SANDBOX_REPO = process.env.OPENHANDS_SANDBOX_REPO || "homelab-projects/openhands-sandbox";
+const GITLAB_PROJECTS_GROUP_ID = process.env.GITLAB_PROJECTS_GROUP_ID || "34";
+
+async function ensureGitLabRepo(slug: string, name: string, description: string): Promise<void> {
+  const encoded = encodeURIComponent(`homelab-projects/${slug}`);
+  try {
+    await gitlabFetch(`/api/v4/projects/${encoded}`);
+    return; // Already exists
+  } catch {
+    // Create it
+    await gitlabFetch(`/api/v4/projects`, {
+      method: "POST",
+      body: JSON.stringify({
+        name: slug,
+        namespace_id: parseInt(GITLAB_PROJECTS_GROUP_ID),
+        description: `${name}: ${description}`,
+        visibility: "private",
+        initialize_with_readme: true,
+        auto_devops_enabled: false,
+      }),
+    });
+    log("info", "execution", "repo", `Created production repo homelab-projects/${slug}`);
+  }
+}
+
+async function ensureWorkspace(project: any): Promise<void> {
+  const ws = await pgQuery(`SELECT id FROM project_workspaces WHERE project_id = $1`, [project.id]);
+  if (ws.rowCount > 0) return;
+
+  // 1. Auto-create production repo if it doesn't exist
+  await ensureGitLabRepo(project.slug, project.name, project.description || "");
+
+  // 2. Create workspace pointing to sandbox repo (not the production repo)
+  await createWorkspaceDirect(project.slug, project.name, SANDBOX_REPO);
+  log("info", "execution", "workspace", `Auto-created workspace for ${project.slug} (sandbox: ${SANDBOX_REPO})`);
+}
+
+async function pushMicroagent(project: any): Promise<void> {
+  const encoded = encodeURIComponent(SANDBOX_REPO);
+
+  // Gather research context
+  const research = await pgQuery(
+    `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
+    [project.id]
+  );
+  const arch = research.rows.find((r: any) => r.section === 'architecture-design')?.findings || "";
+  const security = research.rows.find((r: any) => r.section === 'security-assessment')?.findings || "";
+  const techStack = JSON.stringify(project.scope_of_work?.tech_stack || {}, null, 2);
+
+  const archStr = typeof arch === "string" ? arch.slice(0, 5000) : JSON.stringify(arch).slice(0, 5000);
+  const secStr = typeof security === "string" ? security.slice(0, 3000) : JSON.stringify(security).slice(0, 3000);
+
+  const microagentContent = `# ${project.name} - Project Guidelines\n\n## Architecture\n${archStr}\n\n## Security Requirements\n${secStr}\n\n## Tech Stack\n${techStack}\n`;
+
+  const filePath = encodeURIComponent(`.openhands/microagents/${project.slug}.md`);
+
+  // Try to update existing file first, fall back to create
+  try {
+    await gitlabFetch(`/api/v4/projects/${encoded}/repository/files/${filePath}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        branch: "main",
+        content: microagentContent,
+        commit_message: `Update microagent for ${project.slug}`,
+      }),
+    });
+  } catch {
+    try {
+      await gitlabFetch(`/api/v4/projects/${encoded}/repository/files/${filePath}`, {
+        method: "POST",
+        body: JSON.stringify({
+          branch: "main",
+          content: microagentContent,
+          commit_message: `Add microagent for ${project.slug}`,
+        }),
+      });
+    } catch (e: any) {
+      log("warn", "execution", "microagent", `Failed to push microagent: ${e.message}`);
+    }
+  }
+  log("info", "execution", "microagent", `Microagent pushed for ${project.slug}`);
+}
+
+function parseSowIntoSprints(sow: any): any[] {
+  if (!sow) return [];
+  // Handle various nested formats the Dify workflow might produce
+  const sprints = sow.sprints || sow.sprint_plan || sow.sow?.sprints || sow.sow?.sprint_plan || [];
+  if (!Array.isArray(sprints)) return [];
+  return sprints;
+}
+
+// -- Sprint Execution Pipeline ------------------------------------------------
+
+async function runSprintExecution(project: any, sprintNumber: number, feedback?: string): Promise<void> {
+  log("info", "execution", "sprint", `Starting sprint ${sprintNumber} execution for ${project.slug}`);
+
+  // Ensure workspace + repos exist
+  await ensureWorkspace(project);
+
+  // Push microagent with project context
+  try { await pushMicroagent(project); } catch { /* non-blocking */ }
+
+  // Get sprint row
+  const sprintResult = await pgQuery(
+    `SELECT * FROM pipeline_sprints WHERE project_id = $1 AND sprint_number = $2`,
+    [project.id, sprintNumber]
+  );
+  if (sprintResult.rowCount === 0) throw new Error(`Sprint ${sprintNumber} not found for ${project.slug}`);
+  const sprintRow = sprintResult.rows[0];
+
+  // Build task list from sprint
+  const tasks = sprintRow.tasks || [];
+  const taskList = Array.isArray(tasks)
+    ? tasks.map((t: any, i: number) => `${i + 1}. ${typeof t === "string" ? t : t.task || t.name || JSON.stringify(t)}`).join("\n")
+    : JSON.stringify(tasks);
+
+  // Determine branch name (sandbox convention)
+  const branchName = `${project.slug}/sprint-${sprintNumber}`;
+
+  // Chain from previous sprint if it exists, otherwise from main
+  let baseBranch = "main";
+  if (sprintNumber > 1) {
+    const prevSprint = (await pgQuery(
+      `SELECT branch_name FROM pipeline_sprints WHERE project_id = $1 AND sprint_number = $2 AND status = 'completed'`,
+      [project.id, sprintNumber - 1]
+    )).rows[0];
+    if (prevSprint?.branch_name) baseBranch = prevSprint.branch_name;
+  }
+
+  // Create the branch in sandbox repo via GitLab API
+  const encodedSandbox = encodeURIComponent(SANDBOX_REPO);
+  try {
+    await gitlabFetch(`/api/v4/projects/${encodedSandbox}/repository/branches`, {
+      method: "POST",
+      body: JSON.stringify({ branch: branchName, ref: baseBranch }),
+    });
+    log("info", "execution", "branch", `Created branch ${branchName} from ${baseBranch}`);
+  } catch {
+    log("info", "execution", "branch", `Branch ${branchName} may already exist, continuing`);
+  }
+
+  // Store branch name on sprint
+  await pgQuery(`UPDATE pipeline_sprints SET branch_name = $1, status = 'active', started_at = NOW() WHERE id = $2`, [branchName, sprintRow.id]);
+
+  // Build the coding prompt — try Dify detailed prompt first, fall back to basic
+  let codingPrompt = `Sprint ${sprintNumber}: ${sprintRow.name}\nProject: ${project.name}\nBranch: ${branchName}\n\nTasks:\n${taskList}`;
+  let detailedPrompt = codingPrompt;
+
+  try {
+    // Gather all context: architecture, security findings
+    const research = await pgQuery(
+      `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
+      [project.id]
+    );
+    const archFindings = research.rows.find((r: any) => r.section === 'architecture-design')?.findings || "";
+    const fileStructure = research.rows.find((r: any) => r.section === 'file-structure')?.findings || "";
+    const securityFindings = research.rows.find((r: any) => r.section === 'security-assessment')?.findings || "";
+
+    const archStr = typeof archFindings === "string" ? archFindings : JSON.stringify(archFindings);
+    const fileStr = typeof fileStructure === "string" ? fileStructure : JSON.stringify(fileStructure);
+    const secStr = typeof securityFindings === "string" ? securityFindings : JSON.stringify(securityFindings);
+
+    const difyKey = DIFY_DEVTEAM_KEYS["pm-generate-task-prompts"];
+    if (difyKey && difyKey.startsWith("app-")) {
+      const result = await callDify(difyKey, {
+        project_name: project.name,
+        sprint_name: sprintRow.name,
+        sprint_tasks: taskList,
+        architecture: archStr.slice(0, 20000),
+        file_structure: fileStr.slice(0, 10000),
+        security_requirements: secStr.slice(0, 10000),
+        tech_stack: JSON.stringify(project.scope_of_work?.tech_stack || {}),
+      }, "pm-generate-task-prompts");
+
+      if (result?.data?.status === "succeeded") {
+        detailedPrompt = result.data.outputs?.result || detailedPrompt;
+      }
+    }
+  } catch (err: any) {
+    log("warn", "execution", "prompt", `Detailed prompt generation failed, using basic prompt: ${err.message}`);
+  }
+
+  // Prepend feedback if this is a retry
+  if (feedback) {
+    detailedPrompt = `IMPORTANT - Previous attempt was REJECTED. You MUST address this feedback:\n${feedback}\n\n---\n\n${detailedPrompt}`;
+  }
+
+  // Build rich conversation instructions
+  const instructions = `You are a senior developer working on ${project.name}.
+
+CRITICAL RULES:
+- Work ONLY on branch: ${branchName}
+- Commit frequently with clear messages
+- Follow the architecture and patterns described in the task prompt exactly
+- Run any tests you create before committing
+- Push your branch when done: git push origin ${branchName}
+
+PROJECT CONTEXT:
+${project.description || ""}
+
+TECH STACK:
+${JSON.stringify(project.scope_of_work?.tech_stack || {}, null, 2)}`;
+
+  // Create the OpenHands coding session
+  try {
+    const session = await createCodingSessionDirect(
+      project.slug, sprintNumber, detailedPrompt,
+      instructions, branchName
+    );
+
+    log("info", "execution", "session", `OpenHands session created for sprint ${sprintNumber}`, {
+      conversation_id: session.conversation_id, branch: branchName,
+    });
+
+    await mmPipelineUpdate(project.name, `Sprint ${sprintNumber} coding started. Branch: \`${branchName}\`\nConversation: \`${session.conversation_id}\``, "computer");
+
+    // Fire-and-forget monitoring
+    monitorCodingSession(project, sprintRow, session.conversation_id, branchName).catch(async (err) => {
+      log("error", "execution", "monitor", `Session monitor crashed: ${err.message}`);
+      await ntfyError("execution", "monitor", `Monitor crashed for ${project.slug} sprint ${sprintNumber}: ${err.message}`, {});
+    });
+  } catch (err: any) {
+    log("error", "execution", "session", `Failed to create coding session: ${err.message}`);
+    await pgQuery(`UPDATE pipeline_sprints SET status = 'pending' WHERE id = $1`, [sprintRow.id]);
+    throw err;
+  }
+}
+
+async function monitorCodingSession(project: any, sprintRow: any, conversationId: string, branchName: string): Promise<void> {
+  const MAX_POLLS = 120; // 120 * 30s = 60 minutes max
+  const POLL_INTERVAL = 30000; // 30 seconds
+
+  for (let poll = 0; poll < MAX_POLLS; poll++) {
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+
+    try {
+      const status = await getConversationStatus(conversationId);
+      const convStatus = status?.conversation?.status || status?.conversation?.state;
+
+      if (convStatus === "FINISHED" || convStatus === "completed" || convStatus === "stopped") {
+        log("info", "execution", "monitor", `Session ${conversationId} finished for sprint ${sprintRow.sprint_number}`);
+
+        // Run code reviewer via Dify
+        let reviewOutput = "";
+        try {
+          const reviewKey = DIFY_DEVTEAM_KEYS["code-reviewer"];
+          if (reviewKey && reviewKey.startsWith("app-")) {
+            const reviewResult = await callDify(reviewKey, {
+              project_name: project.name,
+              code_diff: `Branch: ${branchName} (see sandbox repo for full diff)`,
+              sprint_tasks: JSON.stringify(sprintRow.tasks || []),
+            }, "code-reviewer");
+            if (reviewResult?.data?.status === "succeeded") {
+              reviewOutput = reviewResult.data.outputs?.result || "";
+            }
+          }
+        } catch (err: any) {
+          log("warn", "execution", "review", `Code review failed: ${err.message}`);
+          reviewOutput = "(Code review unavailable)";
+        }
+
+        // Run war room code review (architect perspective)
+        let warRoomReview = "";
+        try {
+          const architectKey = DIFY_DEVTEAM_KEYS["architect-revise"];
+          if (architectKey && architectKey.startsWith("app-")) {
+            const research = await pgQuery(
+              `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND section = 'architecture-design' AND status = 'complete'`,
+              [project.id]
+            );
+            const archFindings = research.rows[0]?.findings || "";
+            const archStr = typeof archFindings === "string" ? archFindings : JSON.stringify(archFindings);
+
+            const archReview = await callDify(architectKey, {
+              project_name: project.name,
+              previous_design: archStr.slice(0, 8000),
+              feedback: `Review this sprint's code changes for architecture compliance:\n${reviewOutput.slice(0, 4000)}`,
+              security_findings: "",
+            }, "architect-revise");
+            if (archReview?.data?.status === "succeeded") {
+              warRoomReview = archReview.data.outputs?.result || "";
+            }
+          }
+        } catch {
+          log("warn", "execution", "warroom-review", "War room code review failed (non-blocking)");
+        }
+
+        // Submit for human review
+        const reviewContent = `## Sprint ${sprintRow.sprint_number}: ${sprintRow.name}\n\n` +
+          `**Branch:** \`${branchName}\` (sandbox repo)\n` +
+          `**Conversation:** \`${conversationId}\`\n\n` +
+          `### Code Review\n${reviewOutput || "(No review output)"}\n\n` +
+          (warRoomReview ? `### Architecture Review\n${warRoomReview}\n\n` : "") +
+          `### Tasks\n${JSON.stringify(sprintRow.tasks || [], null, 2)}`;
+
+        await tools.submit_for_review.handler({
+          slug: project.slug,
+          title: `Sprint ${sprintRow.sprint_number}: ${sprintRow.name}`,
+          content: reviewContent,
+          review_type: "sprint",
+          sprint_number: sprintRow.sprint_number,
+        });
+
+        return;
+      }
+
+      if (convStatus === "ERROR" || convStatus === "error") {
+        log("error", "execution", "monitor", `Session ${conversationId} errored`);
+        await pgQuery(`UPDATE pipeline_sprints SET status = 'pending' WHERE id = $1`, [sprintRow.id]);
+        await mmPipelineUpdate(project.name, `Sprint ${sprintRow.sprint_number} coding session errored: ${conversationId}`, "x");
+        return;
+      }
+
+      // Still running — continue polling
+      if (poll % 10 === 0 && poll > 0) {
+        log("info", "execution", "monitor", `Session ${conversationId} still running (poll ${poll})`);
+      }
+    } catch (err: any) {
+      log("warn", "execution", "monitor", `Poll error (will retry): ${err.message}`);
+    }
+  }
+
+  // Timed out
+  log("warn", "execution", "monitor", `Session ${conversationId} timed out after ${MAX_POLLS * POLL_INTERVAL / 60000} minutes`);
+  await mmPipelineUpdate(project.name, `Sprint ${sprintRow.sprint_number} coding session timed out`, "warning");
+}
+
+
 // --- Sub-tools ---
 
 const tools: Record<string, {
@@ -473,7 +780,7 @@ const tools: Record<string, {
   handler: (p: Record<string, any>) => Promise<any>;
 }> = {
 
-  // ── Project CRUD ─────────────────────────────────────────
+  // -- Project CRUD -----------------------------------------------------------
 
   create_project: {
     description: "Create a new project idea. Inserts into PG and triggers GitLab sync via n8n.",
@@ -507,6 +814,7 @@ const tools: Record<string, {
 
       // Notify
       await ntfyNotify(`New project: ${p.name}`, "Project Created", 3, ["rocket"]);
+      await mmPipelineUpdate(p.name, "New project created", "rocket");
 
       return project;
     },
@@ -606,7 +914,7 @@ const tools: Record<string, {
   },
 
   advance_stage: {
-    description: "Move project to next stage with validation gates. queue→research→architecture→security_review→planning→active→completed.",
+    description: "Move project to next stage with validation gates. queue->research->architecture->security_review->planning->active->completed.",
     params: { slug: "Project slug" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
@@ -621,7 +929,6 @@ const tools: Record<string, {
 
       // Validation gates
       if (nextStage === "architecture") {
-        // All research sections must be complete
         const research = await pgQuery(
           `SELECT section, status FROM pipeline_research WHERE project_id = $1`, [project.id]
         );
@@ -639,7 +946,6 @@ const tools: Record<string, {
       }
 
       if (nextStage === "security_review") {
-        // Architecture design must be stored in research table as section type 'architecture-design'
         const archDesign = await pgQuery(
           `SELECT id FROM pipeline_research WHERE project_id = $1 AND section = 'architecture-design' AND status = 'complete'`,
           [project.id]
@@ -650,7 +956,6 @@ const tools: Record<string, {
       }
 
       if (nextStage === "planning") {
-        // No blocking security issues
         const secReview = await pgQuery(
           `SELECT id FROM pipeline_research WHERE project_id = $1 AND section = 'security-assessment' AND status = 'complete'`,
           [project.id]
@@ -658,7 +963,6 @@ const tools: Record<string, {
         if (secReview.rowCount === 0) {
           throw new Error("Cannot advance to planning: security review not complete");
         }
-        // Check for blocking security findings in agent_tasks
         const blockingSec = await pgQuery(
           `SELECT COUNT(*) as count FROM agent_tasks WHERE project_id = $1 AND task_type = 'security' AND status = 'failed'`,
           [project.id]
@@ -721,7 +1025,7 @@ const tools: Record<string, {
           project: result.rows[0],
         });
         if (!orchResult) {
-          await ntfyError("stage", "orchestrator", `Dev-team orchestrator FAILED to trigger for ${p.slug} → ${nextStage}`, {
+          await ntfyError("stage", "orchestrator", `Dev-team orchestrator FAILED to trigger for ${p.slug} \u2192 ${nextStage}`, {
             slug: p.slug, stage: nextStage,
           });
         } else {
@@ -729,7 +1033,8 @@ const tools: Record<string, {
         }
       }
 
-      await ntfyNotify(`${project.name}: ${project.stage} → ${nextStage}`, "Stage Change", 3, ["arrow_right"]);
+      await ntfyNotify(`${project.name}: ${project.stage} \u2192 ${nextStage}`, "Stage Change", 3, ["arrow_right"]);
+      await mmPipelineUpdate(project.name, `Stage: ${project.stage} \u2192 ${nextStage}`, "arrow_right");
 
       return result.rows[0];
     },
@@ -753,7 +1058,7 @@ const tools: Record<string, {
     },
   },
 
-  // ── Research ─────────────────────────────────────────────
+  // -- Research ---------------------------------------------------------------
 
   start_research: {
     description: "Set project stage to 'research' and run the Dify research pipeline. Creates placeholder research sections and processes them sequentially via Dify.",
@@ -763,7 +1068,6 @@ const tools: Record<string, {
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
       const project = proj.rows[0];
 
-      // Create research section rows
       for (const section of RESEARCH_SECTIONS) {
         await pgQuery(
           `INSERT INTO pipeline_research (project_id, section) VALUES ($1, $2) ON CONFLICT (project_id, section) DO NOTHING`,
@@ -771,7 +1075,6 @@ const tools: Record<string, {
         );
       }
 
-      // Update stage
       await pgQuery(
         `UPDATE pipeline_projects SET stage = 'research', research_started_at = NOW(), updated_at = NOW() WHERE id = $1`,
         [project.id]
@@ -782,12 +1085,8 @@ const tools: Record<string, {
         [project.id, "research_started", JSON.stringify({ sections: RESEARCH_SECTIONS })]
       );
 
-      // Fire-and-forget: run Dify research pipeline in background
       runResearchPipeline({
-        id: project.id,
-        slug: project.slug,
-        name: project.name,
-        description: project.description,
+        id: project.id, slug: project.slug, name: project.name, description: project.description,
       }).catch(async (err) => {
         await ntfyError("research", "pipeline", `Pipeline CRASHED for ${project.slug}: ${err.message}`, {
           slug: project.slug, error: err.message, stack: err.stack?.slice(0, 500),
@@ -795,6 +1094,7 @@ const tools: Record<string, {
       });
 
       await ntfyNotify(`Research started for: ${project.name}`, "Research Started", 3, ["mag"]);
+      await mmPipelineUpdate(project.name, "Research pipeline started", "mag");
 
       return { ok: true, slug: project.slug, sections: RESEARCH_SECTIONS, message: "Dify research pipeline launched (runs in background)" };
     },
@@ -806,10 +1106,7 @@ const tools: Record<string, {
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `SELECT * FROM pipeline_research WHERE project_id = $1 ORDER BY section`, [proj.rows[0].id]
-      );
+      const result = await pgQuery(`SELECT * FROM pipeline_research WHERE project_id = $1 ORDER BY section`, [proj.rows[0].id]);
       return { slug: p.slug, sections: result.rows };
     },
   },
@@ -828,157 +1125,84 @@ const tools: Record<string, {
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const fields: string[] = [];
-      const params: any[] = [];
-      let idx = 1;
-
+      const fields: string[] = []; const params: any[] = []; let idx = 1;
       if (p.findings !== undefined) { fields.push(`findings = $${idx++}`); params.push(JSON.stringify(p.findings)); }
       if (p.concerns !== undefined) { fields.push(`concerns = $${idx++}`); params.push(p.concerns); }
       if (p.recommendations !== undefined) { fields.push(`recommendations = $${idx++}`); params.push(p.recommendations); }
       if (p.confidence_score !== undefined) { fields.push(`confidence_score = $${idx++}`); params.push(p.confidence_score); }
       if (p.status !== undefined) { fields.push(`status = $${idx++}`); params.push(p.status); }
       fields.push(`updated_at = NOW()`);
-
       if (fields.length <= 1) throw new Error("No fields to update");
-
       params.push(proj.rows[0].id, p.section);
       const sql = `UPDATE pipeline_research SET ${fields.join(", ")} WHERE project_id = $${idx++} AND section = $${idx} RETURNING *`;
       const result = await pgQuery(sql, params);
       if (result.rowCount === 0) throw new Error(`Section '${p.section}' not found for project '${p.slug}'`);
-
       return result.rows[0];
     },
   },
 
   complete_research: {
     description: "Mark research done and compile/store scope of work.",
-    params: {
-      slug: "Project slug",
-      scope_of_work: "Compiled SOW as JSON object",
-    },
+    params: { slug: "Project slug", scope_of_work: "Compiled SOW as JSON object" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
       const project = proj.rows[0];
-
-      // Mark all research sections complete
-      await pgQuery(
-        `UPDATE pipeline_research SET status = 'complete', updated_at = NOW() WHERE project_id = $1 AND status != 'complete'`,
-        [project.id]
-      );
-
-      // Store SOW and update timestamps
-      await pgQuery(
-        `UPDATE pipeline_projects SET scope_of_work = $1, research_completed_at = NOW(), updated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(p.scope_of_work), project.id]
-      );
-
-      await pgQuery(
-        `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
-        [project.id, "research_completed", JSON.stringify({ sections_count: RESEARCH_SECTIONS.length })]
-      );
-
+      await pgQuery(`UPDATE pipeline_research SET status = 'complete', updated_at = NOW() WHERE project_id = $1 AND status != 'complete'`, [project.id]);
+      await pgQuery(`UPDATE pipeline_projects SET scope_of_work = $1, research_completed_at = NOW(), updated_at = NOW() WHERE id = $2`, [JSON.stringify(p.scope_of_work), project.id]);
+      await pgQuery(`INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`, [project.id, "research_completed", JSON.stringify({ sections_count: RESEARCH_SECTIONS.length })]);
       await ntfyNotify(`Research complete for: ${project.name}. SOW ready.`, "Research Complete", 4, ["white_check_mark"]);
-
+      await mmPipelineUpdate(project.name, "Research pipeline complete. SOW ready.", "white_check_mark");
       return { ok: true, slug: p.slug, message: "Research completed and SOW stored" };
     },
   },
 
-  // ── Questions (Async Q&A) ────────────────────────────────
+  // -- Questions (Async Q&A) --------------------------------------------------
 
   add_question: {
-    description: "Post a question about a project. Sends ntfy notification for async Q&A.",
-    params: {
-      slug: "Project slug",
-      question: "The question text",
-      context: "(optional) Context for why this question matters",
-      priority: "(optional) blocking|normal|nice-to-have, default normal",
-    },
+    description: "Post a question about a project. Sends Mattermost notification for async Q&A.",
+    params: { slug: "Project slug", question: "The question text", context: "(optional) Context for why this question matters", priority: "(optional) blocking|normal|nice-to-have, default normal" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id, name FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `INSERT INTO pipeline_questions (project_id, question, context, priority)
-         VALUES ($1, $2, $3, $4) RETURNING *`,
-        [proj.rows[0].id, p.question, p.context || null, p.priority || "normal"]
-      );
-
+      const result = await pgQuery(`INSERT INTO pipeline_questions (project_id, question, context, priority) VALUES ($1, $2, $3, $4) RETURNING *`, [proj.rows[0].id, p.question, p.context || null, p.priority || "normal"]);
       const priorityTag = p.priority === "blocking" ? "exclamation" : "question";
       const priorityLevel = p.priority === "blocking" ? 4 : 3;
-      await ntfyNotify(
-        `[${proj.rows[0].name}] ${p.question}`,
-        `${(p.priority || "normal").toUpperCase()} Question`,
-        priorityLevel,
-        [priorityTag]
-      );
-
+      await ntfyNotify(`[${proj.rows[0].name}] ${p.question}`, `${(p.priority || "normal").toUpperCase()} Question`, priorityLevel, [priorityTag]);
       return result.rows[0];
     },
   },
 
   answer_question: {
     description: "Answer a question by ID. Checks if this unblocks research and triggers resume if so.",
-    params: {
-      id: "Question ID",
-      answer: "The answer text",
-    },
+    params: { id: "Question ID", answer: "The answer text" },
     handler: async (p) => {
-      const result = await pgQuery(
-        `UPDATE pipeline_questions SET answer = $1, answered_at = NOW() WHERE id = $2 RETURNING *`,
-        [p.answer, p.id]
-      );
+      const result = await pgQuery(`UPDATE pipeline_questions SET answer = $1, answered_at = NOW() WHERE id = $2 RETURNING *`, [p.answer, p.id]);
       if (result.rowCount === 0) throw new Error(`Question ${p.id} not found`);
-
       const question = result.rows[0];
-
-      // Check if this was a blocking question and if research can resume
       if (question.priority === "blocking") {
-        const remaining = await pgQuery(
-          `SELECT COUNT(*) as count FROM pipeline_questions WHERE project_id = $1 AND priority = 'blocking' AND answer IS NULL`,
-          [question.project_id]
-        );
+        const remaining = await pgQuery(`SELECT COUNT(*) as count FROM pipeline_questions WHERE project_id = $1 AND priority = 'blocking' AND answer IS NULL`, [question.project_id]);
         if (parseInt(remaining.rows[0].count) === 0) {
-          // All blocking questions answered — check for needs_input sections
-          const needsInput = await pgQuery(
-            `SELECT section FROM pipeline_research WHERE project_id = $1 AND status = 'needs_input'`,
-            [question.project_id]
-          );
+          const needsInput = await pgQuery(`SELECT section FROM pipeline_research WHERE project_id = $1 AND status = 'needs_input'`, [question.project_id]);
           if (needsInput.rowCount > 0) {
             const proj = await pgQuery(`SELECT slug FROM pipeline_projects WHERE id = $1`, [question.project_id]);
-            triggerN8n("project-research-resume", {
-              slug: proj.rows[0].slug,
-              sections: needsInput.rows.map((r: any) => r.section),
-            });
+            triggerN8n("project-research-resume", { slug: proj.rows[0].slug, sections: needsInput.rows.map((r: any) => r.section) });
             return { ...question, research_resumed: true, sections: needsInput.rows.map((r: any) => r.section) };
           }
         }
       }
-
       return question;
     },
   },
 
   get_unanswered: {
     description: "Get all unanswered questions, optionally filtered by project. Sorted: blocking first.",
-    params: {
-      slug: "(optional) Filter by project slug",
-    },
+    params: { slug: "(optional) Filter by project slug" },
     handler: async (p) => {
-      let sql = `
-        SELECT pq.*, pp.slug, pp.name as project_name
-        FROM pipeline_questions pq
-        JOIN pipeline_projects pp ON pp.id = pq.project_id
-        WHERE pq.answer IS NULL`;
+      let sql = `SELECT pq.*, pp.slug, pp.name as project_name FROM pipeline_questions pq JOIN pipeline_projects pp ON pp.id = pq.project_id WHERE pq.answer IS NULL`;
       const params: any[] = [];
-
-      if (p.slug) {
-        sql += ` AND pp.slug = $1`;
-        params.push(p.slug);
-      }
+      if (p.slug) { sql += ` AND pp.slug = $1`; params.push(p.slug); }
       sql += ` ORDER BY CASE pq.priority WHEN 'blocking' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END, pq.asked_at ASC`;
-
       const result = await pgQuery(sql, params);
       return { questions: result.rows, count: result.rowCount };
     },
@@ -990,100 +1214,53 @@ const tools: Record<string, {
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `SELECT * FROM pipeline_questions WHERE project_id = $1 ORDER BY asked_at ASC`,
-        [proj.rows[0].id]
-      );
+      const result = await pgQuery(`SELECT * FROM pipeline_questions WHERE project_id = $1 ORDER BY asked_at ASC`, [proj.rows[0].id]);
       return { slug: p.slug, questions: result.rows, count: result.rowCount };
     },
   },
 
-  // ── Sprints ──────────────────────────────────────────────
+  // -- Sprints ----------------------------------------------------------------
 
   add_sprint: {
     description: "Add a sprint plan to a project.",
-    params: {
-      slug: "Project slug",
-      sprint_number: "Sprint number (sequential)",
-      name: "Sprint name",
-      description: "(optional) Sprint description",
-      tasks: "(optional) Array of {task, estimated_hours, status} objects",
-      estimated_hours: "(optional) Total estimated hours",
-      estimated_loc: "(optional) Estimated lines of code",
-      complexity: "(optional) low|medium|high|extreme",
-    },
+    params: { slug: "Project slug", sprint_number: "Sprint number (sequential)", name: "Sprint name", description: "(optional) Sprint description", tasks: "(optional) Array of {task, estimated_hours, status} objects", estimated_hours: "(optional) Total estimated hours", estimated_loc: "(optional) Estimated lines of code", complexity: "(optional) low|medium|high|extreme" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `INSERT INTO pipeline_sprints (project_id, sprint_number, name, description, tasks, estimated_hours, estimated_loc, complexity)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-        [
-          proj.rows[0].id, p.sprint_number, p.name, p.description || null,
-          p.tasks ? JSON.stringify(p.tasks) : null, p.estimated_hours || null,
-          p.estimated_loc || null, p.complexity || null,
-        ]
-      );
+      const result = await pgQuery(`INSERT INTO pipeline_sprints (project_id, sprint_number, name, description, tasks, estimated_hours, estimated_loc, complexity) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`, [proj.rows[0].id, p.sprint_number, p.name, p.description || null, p.tasks ? JSON.stringify(p.tasks) : null, p.estimated_hours || null, p.estimated_loc || null, p.complexity || null]);
       return result.rows[0];
     },
   },
 
   update_sprint: {
     description: "Update sprint fields: status, actual hours, actual LOC, tasks.",
-    params: {
-      slug: "Project slug",
-      sprint_number: "Sprint number",
-      status: "(optional) pending|active|completed",
-      actual_hours: "(optional) Actual hours worked",
-      actual_loc: "(optional) Actual lines of code",
-      tasks: "(optional) Updated tasks array",
-    },
+    params: { slug: "Project slug", sprint_number: "Sprint number", status: "(optional) pending|active|completed", actual_hours: "(optional) Actual hours worked", actual_loc: "(optional) Actual lines of code", tasks: "(optional) Updated tasks array" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const fields: string[] = [];
-      const params: any[] = [];
-      let idx = 1;
-
+      const fields: string[] = []; const params: any[] = []; let idx = 1;
       if (p.status !== undefined) { fields.push(`status = $${idx++}`); params.push(p.status); }
       if (p.actual_hours !== undefined) { fields.push(`actual_hours = $${idx++}`); params.push(p.actual_hours); }
       if (p.actual_loc !== undefined) { fields.push(`actual_loc = $${idx++}`); params.push(p.actual_loc); }
       if (p.tasks !== undefined) { fields.push(`tasks = $${idx++}`); params.push(JSON.stringify(p.tasks)); }
       if (fields.length === 0) throw new Error("No fields to update");
-
       params.push(proj.rows[0].id, p.sprint_number);
       const sql = `UPDATE pipeline_sprints SET ${fields.join(", ")} WHERE project_id = $${idx++} AND sprint_number = $${idx} RETURNING *`;
       const result = await pgQuery(sql, params);
       if (result.rowCount === 0) throw new Error(`Sprint ${p.sprint_number} not found`);
-
       return result.rows[0];
     },
   },
 
   start_sprint: {
     description: "Set a sprint to active and record start timestamp.",
-    params: {
-      slug: "Project slug",
-      sprint_number: "Sprint number",
-    },
+    params: { slug: "Project slug", sprint_number: "Sprint number" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id, name FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `UPDATE pipeline_sprints SET status = 'active', started_at = NOW() WHERE project_id = $1 AND sprint_number = $2 RETURNING *`,
-        [proj.rows[0].id, p.sprint_number]
-      );
+      const result = await pgQuery(`UPDATE pipeline_sprints SET status = 'active', started_at = NOW() WHERE project_id = $1 AND sprint_number = $2 RETURNING *`, [proj.rows[0].id, p.sprint_number]);
       if (result.rowCount === 0) throw new Error(`Sprint ${p.sprint_number} not found`);
-
-      await pgQuery(
-        `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
-        [proj.rows[0].id, "sprint_started", JSON.stringify({ sprint_number: p.sprint_number, name: result.rows[0].name })]
-      );
-
+      await pgQuery(`INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`, [proj.rows[0].id, "sprint_started", JSON.stringify({ sprint_number: p.sprint_number, name: result.rows[0].name })]);
       await ntfyNotify(`Sprint ${p.sprint_number} started: ${result.rows[0].name}`, `${proj.rows[0].name}`, 3, ["runner"]);
       return result.rows[0];
     },
@@ -1091,107 +1268,51 @@ const tools: Record<string, {
 
   complete_sprint: {
     description: "Complete a sprint. Records timestamp and updates project actual_hours.",
-    params: {
-      slug: "Project slug",
-      sprint_number: "Sprint number",
-      actual_hours: "(optional) Final actual hours for this sprint",
-      actual_loc: "(optional) Final actual LOC",
-    },
+    params: { slug: "Project slug", sprint_number: "Sprint number", actual_hours: "(optional) Final actual hours for this sprint", actual_loc: "(optional) Final actual LOC" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id, name FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const updates = ["status = 'completed'", "completed_at = NOW()"];
-      const params: any[] = [];
-      let idx = 1;
-
+      const updates = ["status = 'completed'", "completed_at = NOW()"]; const params: any[] = []; let idx = 1;
       if (p.actual_hours !== undefined) { updates.push(`actual_hours = $${idx++}`); params.push(p.actual_hours); }
       if (p.actual_loc !== undefined) { updates.push(`actual_loc = $${idx++}`); params.push(p.actual_loc); }
-
       params.push(proj.rows[0].id, p.sprint_number);
       const sql = `UPDATE pipeline_sprints SET ${updates.join(", ")} WHERE project_id = $${idx++} AND sprint_number = $${idx} RETURNING *`;
       const result = await pgQuery(sql, params);
       if (result.rowCount === 0) throw new Error(`Sprint ${p.sprint_number} not found`);
-
-      // Update project total actual_hours
-      await pgQuery(
-        `UPDATE pipeline_projects SET actual_hours = (SELECT COALESCE(SUM(actual_hours), 0) FROM pipeline_sprints WHERE project_id = $1), updated_at = NOW() WHERE id = $1`,
-        [proj.rows[0].id]
-      );
-
-      await pgQuery(
-        `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
-        [proj.rows[0].id, "sprint_completed", JSON.stringify({ sprint_number: p.sprint_number, actual_hours: result.rows[0].actual_hours })]
-      );
-
+      await pgQuery(`UPDATE pipeline_projects SET actual_hours = (SELECT COALESCE(SUM(actual_hours), 0) FROM pipeline_sprints WHERE project_id = $1), updated_at = NOW() WHERE id = $1`, [proj.rows[0].id]);
+      await pgQuery(`INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`, [proj.rows[0].id, "sprint_completed", JSON.stringify({ sprint_number: p.sprint_number, actual_hours: result.rows[0].actual_hours })]);
       await ntfyNotify(`Sprint ${p.sprint_number} complete!`, `${proj.rows[0].name}`, 3, ["checkered_flag"]);
       return result.rows[0];
     },
   },
 
-  // ── Agent Tasks ────────────────────────────────────────
+  // -- Agent Tasks ------------------------------------------------------------
 
   create_agent_task: {
     description: "Create an agent task for a project sprint. Used by the dev-team orchestrator to queue work items.",
-    params: {
-      slug: "Project slug",
-      sprint_number: "(optional) Sprint number",
-      task_type: "Task type: architect|security|code|review|test|ui",
-      agent_model: "(optional) Model to use (e.g. deepseek/deepseek-r1, anthropic/claude-sonnet-4-5)",
-      prompt: "Task prompt for the agent",
-      tools_enabled: "(optional) Array of gateway tool names this agent can use",
-      guardrails: "(optional) Object: {max_actions, max_tokens, timeout_minutes}",
-    },
+    params: { slug: "Project slug", sprint_number: "(optional) Sprint number", task_type: "Task type: architect|security|code|review|test|ui", agent_model: "(optional) Model to use (e.g. deepseek/deepseek-r1, anthropic/claude-sonnet-4-5)", prompt: "Task prompt for the agent", tools_enabled: "(optional) Array of gateway tool names this agent can use", guardrails: "(optional) Object: {max_actions, max_tokens, timeout_minutes}" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
       let sprintId = null;
-      if (p.sprint_number) {
-        const sprint = await pgQuery(
-          `SELECT id FROM pipeline_sprints WHERE project_id = $1 AND sprint_number = $2`,
-          [proj.rows[0].id, p.sprint_number]
-        );
-        if (sprint.rowCount > 0) sprintId = sprint.rows[0].id;
-      }
-
-      const result = await pgQuery(
-        `INSERT INTO agent_tasks (project_id, sprint_id, task_type, agent_model, prompt, tools_enabled, guardrails)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-        [
-          proj.rows[0].id, sprintId, p.task_type, p.agent_model || null,
-          p.prompt, p.tools_enabled || null,
-          p.guardrails ? JSON.stringify(p.guardrails) : null,
-        ]
-      );
+      if (p.sprint_number) { const sprint = await pgQuery(`SELECT id FROM pipeline_sprints WHERE project_id = $1 AND sprint_number = $2`, [proj.rows[0].id, p.sprint_number]); if (sprint.rowCount > 0) sprintId = sprint.rows[0].id; }
+      const result = await pgQuery(`INSERT INTO agent_tasks (project_id, sprint_id, task_type, agent_model, prompt, tools_enabled, guardrails) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`, [proj.rows[0].id, sprintId, p.task_type, p.agent_model || null, p.prompt, p.tools_enabled || null, p.guardrails ? JSON.stringify(p.guardrails) : null]);
       return result.rows[0];
     },
   },
 
   list_agent_tasks: {
     description: "List agent tasks for a project, optionally filtered by status or type.",
-    params: {
-      slug: "Project slug",
-      status: "(optional) Filter: queued|assigned|in_progress|completed|failed|escalated",
-      task_type: "(optional) Filter by type: architect|security|code|review|test|ui",
-      sprint_number: "(optional) Filter by sprint",
-    },
+    params: { slug: "Project slug", status: "(optional) Filter: queued|assigned|in_progress|completed|failed|escalated", task_type: "(optional) Filter by type: architect|security|code|review|test|ui", sprint_number: "(optional) Filter by sprint" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      let sql = `SELECT at.*, ps.sprint_number, ps.name as sprint_name
-        FROM agent_tasks at
-        LEFT JOIN pipeline_sprints ps ON ps.id = at.sprint_id
-        WHERE at.project_id = $1`;
-      const params: any[] = [proj.rows[0].id];
-      let idx = 2;
-
+      let sql = `SELECT at.*, ps.sprint_number, ps.name as sprint_name FROM agent_tasks at LEFT JOIN pipeline_sprints ps ON ps.id = at.sprint_id WHERE at.project_id = $1`;
+      const params: any[] = [proj.rows[0].id]; let idx = 2;
       if (p.status) { sql += ` AND at.status = $${idx++}`; params.push(p.status); }
       if (p.task_type) { sql += ` AND at.task_type = $${idx++}`; params.push(p.task_type); }
       if (p.sprint_number) { sql += ` AND ps.sprint_number = $${idx++}`; params.push(p.sprint_number); }
       sql += ` ORDER BY at.created_at ASC`;
-
       const result = await pgQuery(sql, params);
       return { slug: p.slug, tasks: result.rows, count: result.rowCount };
     },
@@ -1199,27 +1320,13 @@ const tools: Record<string, {
 
   update_agent_task: {
     description: "Update an agent task status, result, or iteration count.",
-    params: {
-      id: "Agent task ID",
-      status: "(optional) New status: queued|assigned|in_progress|completed|failed|escalated",
-      result: "(optional) Result as JSON object",
-      iteration: "(optional) New iteration count",
-    },
+    params: { id: "Agent task ID", status: "(optional) New status: queued|assigned|in_progress|completed|failed|escalated", result: "(optional) Result as JSON object", iteration: "(optional) New iteration count" },
     handler: async (p) => {
-      const fields: string[] = [];
-      const params: any[] = [];
-      let idx = 1;
-
-      if (p.status !== undefined) {
-        fields.push(`status = $${idx++}`);
-        params.push(p.status);
-        if (p.status === "in_progress") fields.push("started_at = NOW()");
-        if (p.status === "completed" || p.status === "failed") fields.push("completed_at = NOW()");
-      }
+      const fields: string[] = []; const params: any[] = []; let idx = 1;
+      if (p.status !== undefined) { fields.push(`status = $${idx++}`); params.push(p.status); if (p.status === "in_progress") fields.push("started_at = NOW()"); if (p.status === "completed" || p.status === "failed") fields.push("completed_at = NOW()"); }
       if (p.result !== undefined) { fields.push(`result = $${idx++}`); params.push(JSON.stringify(p.result)); }
       if (p.iteration !== undefined) { fields.push(`iteration = $${idx++}`); params.push(p.iteration); }
       if (fields.length === 0) throw new Error("No fields to update");
-
       params.push(p.id);
       const sql = `UPDATE agent_tasks SET ${fields.join(", ")} WHERE id = $${idx} RETURNING *`;
       const result = await pgQuery(sql, params);
@@ -1230,106 +1337,77 @@ const tools: Record<string, {
 
   run_devteam_workflow: {
     description: "Run a dev-team Dify workflow. Pass async=true to return immediately with a job_id (poll with get_devteam_result). Default: blocking.",
-    params: {
-      workflow: "Workflow name from DIFY_DEVTEAM_KEYS",
-      inputs: "Input variables as object (project_name, research_findings, architecture_design, etc.)",
-      async: "(optional) Set to true to run in background and return job_id immediately",
-    },
+    params: { workflow: "Workflow name from DIFY_DEVTEAM_KEYS", inputs: "Input variables as object (project_name, research_findings, architecture_design, etc.)", async: "(optional) Set to true to run in background and return job_id immediately" },
     handler: async (p) => {
       const apiKey = DIFY_DEVTEAM_KEYS[p.workflow];
       if (!apiKey) throw new Error(`Unknown dev-team workflow: ${p.workflow}. Available: ${Object.keys(DIFY_DEVTEAM_KEYS).join(", ")}`);
       if (!apiKey.startsWith("app-")) throw new Error(`Dify API key not configured for workflow: ${p.workflow}`);
 
-      // Async mode: fire and return job_id
       if (p.async) {
         const jobId = `job-${++jobCounter}-${Date.now()}`;
         const job: AsyncJob = { id: jobId, workflow: p.workflow, status: "running", started_at: new Date().toISOString() };
         asyncJobs.set(jobId, job);
         log("info", "devteam", p.workflow, `Async job started: ${jobId}`, { inputs_keys: Object.keys(p.inputs || {}) });
 
-        callDify(apiKey, p.inputs || {}, p.workflow).then((difyResponse) => {
+        callDify(apiKey, p.inputs || {}, p.workflow).then(async (difyResponse) => {
           const data = difyResponse?.data;
           if (!data || data.status !== "succeeded") {
-            job.status = "failed";
-            job.error = data?.error || "unknown error";
-            job.completed_at = new Date().toISOString();
-            ntfyError("devteam", p.workflow, `Async job ${jobId} failed: ${job.error}`, { workflow: p.workflow });
+            job.status = "failed"; job.error = data?.error || "unknown error"; job.completed_at = new Date().toISOString();
+            await ntfyError("devteam", p.workflow, `Async job ${jobId} failed: ${job.error}`, { workflow: p.workflow });
           } else {
-            job.status = "succeeded";
-            job.result = data.outputs?.result || data.outputs;
-            job.elapsed_time = data.elapsed_time;
-            job.total_tokens = data.total_tokens;
-            job.completed_at = new Date().toISOString();
+            job.status = "succeeded"; job.result = data.outputs?.result || data.outputs; job.elapsed_time = data.elapsed_time; job.total_tokens = data.total_tokens; job.completed_at = new Date().toISOString();
             log("info", "devteam", p.workflow, `Async job ${jobId} succeeded`, { tokens: data.total_tokens, elapsed: data.elapsed_time });
+            const resultText = typeof job.result === "string" ? job.result : JSON.stringify(job.result, null, 2);
+            const contentType = ["focused-research", "pm-generate-sow"].includes(p.workflow) ? (p.workflow === "pm-generate-sow" ? "sow" : "research") : "other";
+            await mmDeliverable(p.inputs?.project_name || p.workflow, `${p.workflow} (job ${jobId})`, resultText, contentType);
+            await mmPipelineUpdate(p.inputs?.project_name || p.workflow, `${p.workflow} completed (${data.elapsed_time?.toFixed(1)}s, ${data.total_tokens} tokens)`, "white_check_mark");
           }
-        }).catch((e: any) => {
-          job.status = "failed";
-          job.error = e.message;
-          job.completed_at = new Date().toISOString();
-          ntfyError("devteam", p.workflow, `Async job ${jobId} error: ${e.message}`, { workflow: p.workflow });
+        }).catch(async (e: any) => {
+          job.status = "failed"; job.error = e.message; job.completed_at = new Date().toISOString();
+          await ntfyError("devteam", p.workflow, `Async job ${jobId} error: ${e.message}`, { workflow: p.workflow });
         });
 
         return { job_id: jobId, workflow: p.workflow, status: "running", message: "Workflow started in background. Poll with get_devteam_result." };
       }
 
-      // Blocking mode (original behavior)
       const difyResponse = await callDify(apiKey, p.inputs || {}, p.workflow);
       const data = difyResponse?.data;
       if (!data || data.status !== "succeeded") {
         const errMsg = `Dify workflow ${p.workflow} failed: ${data?.error || "unknown error"}`;
-        await ntfyError("devteam", p.workflow, errMsg, {
-          workflow: p.workflow, status: data?.status, error: data?.error,
-        });
+        await ntfyError("devteam", p.workflow, errMsg, { workflow: p.workflow, status: data?.status, error: data?.error });
         throw new Error(errMsg);
       }
-      log("info", "devteam", p.workflow, `Workflow succeeded`, {
-        tokens: data.total_tokens, elapsed: data.elapsed_time,
-      });
-      return {
-        workflow: p.workflow,
-        result: data.outputs?.result || data.outputs,
-        elapsed_time: data.elapsed_time,
-        total_tokens: data.total_tokens,
-      };
+      log("info", "devteam", p.workflow, `Workflow succeeded`, { tokens: data.total_tokens, elapsed: data.elapsed_time });
+      const outputResult = data.outputs?.result || data.outputs;
+      if (["focused-research", "pm-generate-sow"].includes(p.workflow)) {
+        const resultText = typeof outputResult === "string" ? outputResult : JSON.stringify(outputResult, null, 2);
+        const cType = p.workflow === "pm-generate-sow" ? "sow" : "research";
+        await mmDeliverable(p.inputs?.project_name || p.workflow, p.workflow, resultText, cType);
+      }
+      await mmPipelineUpdate(p.inputs?.project_name || p.workflow, `${p.workflow} completed (${data.elapsed_time?.toFixed(1)}s, ${data.total_tokens} tokens)`, "white_check_mark");
+      return { workflow: p.workflow, result: data.outputs?.result || data.outputs, elapsed_time: data.elapsed_time, total_tokens: data.total_tokens };
     },
   },
 
   get_devteam_result: {
     description: "Check status/result of an async dev-team workflow job. Returns status (running|succeeded|failed) and result when done.",
-    params: {
-      job_id: "(optional) Specific job ID to check. Omit to list all recent jobs.",
-    },
+    params: { job_id: "(optional) Specific job ID to check. Omit to list all recent jobs." },
     handler: async (p) => {
-      if (p.job_id) {
-        const job = asyncJobs.get(p.job_id);
-        if (!job) throw new Error(`Job '${p.job_id}' not found. Jobs are in-memory and lost on container restart.`);
-        return job;
-      }
+      if (p.job_id) { const job = asyncJobs.get(p.job_id); if (!job) throw new Error(`Job '${p.job_id}' not found. Jobs are in-memory and lost on container restart.`); return job; }
       const jobs = Array.from(asyncJobs.values()).reverse().slice(0, 20);
       return { jobs, total: asyncJobs.size };
     },
   },
 
-  // ── Artifacts & Tracking ─────────────────────────────────
+  // -- Artifacts & Tracking ---------------------------------------------------
 
   add_artifact: {
     description: "Link a file, container, service, repo, or URL to a project.",
-    params: {
-      slug: "Project slug",
-      type: "Artifact type: file|link|container|service|repo",
-      name: "Artifact name",
-      path_or_url: "(optional) Path or URL",
-      description: "(optional) Description",
-    },
+    params: { slug: "Project slug", type: "Artifact type: file|link|container|service|repo", name: "Artifact name", path_or_url: "(optional) Path or URL", description: "(optional) Description" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `INSERT INTO pipeline_artifacts (project_id, type, name, path_or_url, description)
-         VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-        [proj.rows[0].id, p.type, p.name, p.path_or_url || null, p.description || null]
-      );
+      const result = await pgQuery(`INSERT INTO pipeline_artifacts (project_id, type, name, path_or_url, description) VALUES ($1, $2, $3, $4, $5) RETURNING *`, [proj.rows[0].id, p.type, p.name, p.path_or_url || null, p.description || null]);
       return result.rows[0];
     },
   },
@@ -1340,30 +1418,62 @@ const tools: Record<string, {
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `SELECT * FROM pipeline_artifacts WHERE project_id = $1 ORDER BY created_at`, [proj.rows[0].id]
-      );
+      const result = await pgQuery(`SELECT * FROM pipeline_artifacts WHERE project_id = $1 ORDER BY created_at`, [proj.rows[0].id]);
       return { slug: p.slug, artifacts: result.rows, count: result.rowCount };
     },
   },
 
   log_event: {
     description: "Log a manual event for a project.",
-    params: {
-      slug: "Project slug",
-      event_type: "Event type string (e.g. 'note', 'decision', 'blocker', 'milestone')",
-      details: "(optional) Event details as JSON object",
-    },
+    params: { slug: "Project slug", event_type: "Event type string (e.g. 'note', 'decision', 'blocker', 'milestone')", details: "(optional) Event details as JSON object" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3) RETURNING *`,
-        [proj.rows[0].id, p.event_type, p.details ? JSON.stringify(p.details) : null]
-      );
+      const result = await pgQuery(`INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3) RETURNING *`, [proj.rows[0].id, p.event_type, p.details ? JSON.stringify(p.details) : null]);
       return result.rows[0];
+    },
+  },
+
+  run_sprint: {
+    description: "Execute a sprint by launching an OpenHands coding session with detailed prompts from Dify. Auto-creates workspace/repos if needed. Monitors completion and submits for review.",
+    params: { slug: "Project slug", sprint_number: "Sprint number to execute", feedback: "(optional) Feedback from a previous rejected attempt" },
+    handler: async (p) => {
+      const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+      const project = proj.rows[0];
+      const sprint = await pgQuery(`SELECT * FROM pipeline_sprints WHERE project_id = $1 AND sprint_number = $2`, [project.id, p.sprint_number]);
+      if (sprint.rowCount === 0) throw new Error(`Sprint ${p.sprint_number} not found for ${p.slug}`);
+      runSprintExecution(project, parseInt(p.sprint_number), p.feedback || undefined).catch(async (err) => {
+        log("error", "run_sprint", "execute", `Sprint execution failed: ${err.message}`);
+        await ntfyError("run_sprint", "execute", `Sprint ${p.sprint_number} failed for ${p.slug}: ${err.message}`, {});
+      });
+      return { ok: true, slug: p.slug, sprint_number: p.sprint_number, message: `Sprint ${p.sprint_number} execution launched in background. Monitor via Mattermost #pipeline-updates.` };
+    },
+  },
+
+  populate_sprints_from_sow: {
+    description: "Parse the project's scope_of_work into individual sprint records in pipeline_sprints. Handles various SoW formats.",
+    params: { slug: "Project slug" },
+    handler: async (p) => {
+      const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+      const project = proj.rows[0];
+      if (!project.scope_of_work) throw new Error("No scope_of_work on project");
+      const sprints = parseSowIntoSprints(project.scope_of_work);
+      if (sprints.length === 0) throw new Error("No sprints found in scope_of_work. Expected .sprints or .sprint_plan array.");
+      const created = [];
+      for (let i = 0; i < sprints.length; i++) {
+        const s = sprints[i];
+        const sprintNumber = s.sprint_number || s.number || i + 1;
+        const name = s.name || s.title || `Sprint ${sprintNumber}`;
+        const tasks = s.tasks || s.deliverables || s.items || [];
+        try {
+          await pgQuery(`INSERT INTO pipeline_sprints (project_id, sprint_number, name, description, tasks, estimated_hours, estimated_loc, complexity) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (project_id, sprint_number) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, tasks = EXCLUDED.tasks, estimated_hours = EXCLUDED.estimated_hours, estimated_loc = EXCLUDED.estimated_loc, complexity = EXCLUDED.complexity`, [project.id, sprintNumber, name, s.description || null, tasks.length > 0 ? JSON.stringify(tasks) : null, s.estimated_hours || null, s.estimated_loc || null, s.complexity || null]);
+          created.push({ sprint_number: sprintNumber, name, task_count: tasks.length });
+        } catch (err: any) { log("warn", "sprints", "populate", `Failed to insert sprint ${sprintNumber}: ${err.message}`); }
+      }
+      await mmPipelineUpdate(project.name, `Populated ${created.length} sprints from SoW`, "clipboard");
+      return { slug: p.slug, sprints_created: created, count: created.length };
     },
   },
 
@@ -1372,47 +1482,78 @@ const tools: Record<string, {
     params: {},
     handler: async () => {
       const [stages, complexity, accuracy, costs, recent] = await Promise.all([
-        // Projects by stage
         pgQuery(`SELECT stage, COUNT(*) as count FROM pipeline_projects GROUP BY stage ORDER BY stage`),
-        // Avg hours by complexity
         pgQuery(`SELECT complexity, COUNT(*) as sprints, AVG(actual_hours) as avg_hours, AVG(actual_loc) as avg_loc FROM pipeline_sprints WHERE status = 'completed' AND complexity IS NOT NULL GROUP BY complexity`),
-        // Estimate accuracy
-        pgQuery(`SELECT
-          COUNT(*) as completed_projects,
-          AVG(CASE WHEN estimated_hours > 0 THEN actual_hours / estimated_hours ELSE NULL END) as hours_accuracy_ratio,
-          AVG(CASE WHEN estimated_cost > 0 THEN actual_cost / estimated_cost ELSE NULL END) as cost_accuracy_ratio
-          FROM pipeline_projects WHERE stage = 'completed'`),
-        // Total costs
+        pgQuery(`SELECT COUNT(*) as completed_projects, AVG(CASE WHEN estimated_hours > 0 THEN actual_hours / estimated_hours ELSE NULL END) as hours_accuracy_ratio, AVG(CASE WHEN estimated_cost > 0 THEN actual_cost / estimated_cost ELSE NULL END) as cost_accuracy_ratio FROM pipeline_projects WHERE stage = 'completed'`),
         pgQuery(`SELECT SUM(actual_cost) as total_cost, AVG(actual_cost) as avg_cost FROM pipeline_projects WHERE actual_cost > 0`),
-        // Recent activity
         pgQuery(`SELECT event_type, COUNT(*) as count FROM pipeline_events WHERE timestamp > NOW() - INTERVAL '7 days' GROUP BY event_type`),
       ]);
-
-      return {
-        projects_by_stage: stages.rows,
-        hours_by_complexity: complexity.rows,
-        estimate_accuracy: accuracy.rows[0],
-        cost_summary: costs.rows[0],
-        recent_activity_7d: recent.rows,
-      };
+      return { projects_by_stage: stages.rows, hours_by_complexity: complexity.rows, estimate_accuracy: accuracy.rows[0], cost_summary: costs.rows[0], recent_activity_7d: recent.rows };
     },
   },
 
   get_timeline: {
     description: "Get event history for a project.",
-    params: {
-      slug: "Project slug",
-      limit: "(optional) Max events, default 50",
-    },
+    params: { slug: "Project slug", limit: "(optional) Max events, default 50" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT id FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
-
-      const result = await pgQuery(
-        `SELECT * FROM pipeline_events WHERE project_id = $1 ORDER BY timestamp DESC LIMIT $2`,
-        [proj.rows[0].id, p.limit || 50]
-      );
+      const result = await pgQuery(`SELECT * FROM pipeline_events WHERE project_id = $1 ORDER BY timestamp DESC LIMIT $2`, [proj.rows[0].id, p.limit || 50]);
       return { slug: p.slug, events: result.rows, count: result.rowCount };
+    },
+  },
+
+  // -- Human-in-the-Loop Review System ----------------------------------------
+
+  submit_for_review: {
+    description: "Submit a deliverable for human review in Mattermost. Posts to #human-review with approve/reject instructions. Creates a pending review agent_task.",
+    params: { slug: "Project slug", title: "Review title (e.g. 'Architecture Design v1')", content: "Content to review (markdown)", review_type: "Type: sow|architecture|security|research|other", sprint_number: "(optional) Associated sprint number" },
+    handler: async (p) => {
+      if (!p.slug) throw new Error("slug is required");
+      if (!p.title) throw new Error("title is required");
+      if (!p.content) throw new Error("content is required");
+      if (!p.review_type) throw new Error("review_type is required");
+      const proj = await pgQuery(`SELECT id, name FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+      let sprintId = null;
+      if (p.sprint_number) { const sprint = await pgQuery(`SELECT id FROM pipeline_sprints WHERE project_id = $1 AND sprint_number = $2`, [proj.rows[0].id, p.sprint_number]); if (sprint.rowCount > 0) sprintId = sprint.rows[0].id; }
+      const task = await pgQuery(`INSERT INTO agent_tasks (project_id, sprint_id, task_type, prompt, status) VALUES ($1, $2, 'review', $3, 'pending_review') RETURNING *`, [proj.rows[0].id, sprintId, `Review ${p.review_type}: ${p.title}`]);
+      const taskId = task.rows[0].id;
+      const maxContent = 12000;
+      const displayContent = p.content.length > maxContent ? p.content.slice(0, maxContent) + "\n\n---\n*[Content truncated \u2014 full version in deliverables channel]*" : p.content;
+      const reviewMsg = `### :eyes: Review Required: ${p.title}\n**Project:** ${proj.rows[0].name} (\`${p.slug}\`)\n**Type:** ${p.review_type} | **Task ID:** \`${taskId}\`\n\n---\n\n${displayContent}\n\n---\n\n:white_check_mark: \`/pipeline approve ${taskId}\`  |  :x: \`/pipeline reject ${taskId} <reason>\``;
+      const postResult = await mmPostWithId("human-review", reviewMsg);
+      const mmPostId = postResult?.id || null;
+      await pgQuery(`UPDATE agent_tasks SET result = $1 WHERE id = $2`, [JSON.stringify({ mm_post_id: mmPostId, review_type: p.review_type, title: p.title, slug: p.slug }), taskId]);
+      await mmDeliverable(proj.rows[0].name, p.title, p.content, p.review_type);
+      log("info", "review", "submit", `Review submitted: task ${taskId} for ${p.slug}`, { review_type: p.review_type, title: p.title });
+      await mmPipelineUpdate(proj.rows[0].name, `Review submitted: ${p.title} (task #${taskId})`, "eyes");
+      return { task_id: taskId, status: "pending_review", mm_post_id: mmPostId };
+    },
+  },
+
+  check_review: {
+    description: "Check the status of a review task (pending_review, completed/approved, or failed/rejected).",
+    params: { task_id: "Agent task ID to check" },
+    handler: async (p) => {
+      if (!p.task_id) throw new Error("task_id is required");
+      const result = await pgQuery(`SELECT at.*, pp.slug, pp.name as project_name FROM agent_tasks at JOIN pipeline_projects pp ON pp.id = at.project_id WHERE at.id = $1 AND at.task_type = 'review'`, [p.task_id]);
+      if (result.rowCount === 0) throw new Error(`Review task ${p.task_id} not found`);
+      const task = result.rows[0]; const meta = task.result || {};
+      return { task_id: task.id, slug: task.slug, project: task.project_name, status: task.status, review_type: meta.review_type, title: meta.title, approved: meta.approved, reviewed_by: meta.reviewed_by, reviewed_at: meta.reviewed_at, rejection_reason: meta.rejection_reason, created_at: task.created_at, completed_at: task.completed_at };
+    },
+  },
+
+  list_pending_reviews: {
+    description: "List all pending review tasks awaiting human approval.",
+    params: { slug: "(optional) Filter by project slug" },
+    handler: async (p) => {
+      let sql = `SELECT at.*, pp.slug, pp.name as project_name FROM agent_tasks at JOIN pipeline_projects pp ON pp.id = at.project_id WHERE at.task_type = 'review' AND at.status = 'pending_review'`;
+      const params: any[] = [];
+      if (p.slug) { sql += ` AND pp.slug = $1`; params.push(p.slug); }
+      sql += ` ORDER BY at.created_at ASC`;
+      const result = await pgQuery(sql, params);
+      return { pending_reviews: result.rows.map((r: any) => ({ task_id: r.id, slug: r.slug, project: r.project_name, title: r.result?.title, review_type: r.result?.review_type, created_at: r.created_at })), count: result.rowCount };
     },
   },
 };
@@ -1425,14 +1566,12 @@ export function registerProjectTools(server: McpServer) {
     "List all available Project Pipeline tools. Manages the full dev-team automation lifecycle: idea capture, " +
     "research (13 sections), architecture, security review, planning, building, and completion. Tools cover: " +
     "project CRUD (create/list/get/update/advance/archive), research (start/get/update/complete), " +
-    "agent tasks (create/list/update/run_devteam_workflow), async questions (add/answer/get_unanswered/get), " +
+    "agent tasks (create/list/update/run_devteam_workflow), human-in-the-loop reviews (submit_for_review/check_review/list_pending_reviews), async questions (add/answer/get_unanswered/get), " +
     "sprints (add/update/start/complete), artifacts (add/list), and tracking (log_event/get_metrics/get_timeline).",
     {},
     async () => {
       const toolList = Object.entries(tools).map(([name, def]) => ({
-        tool: name,
-        description: def.description,
-        params: def.params,
+        tool: name, description: def.description, params: def.params,
       }));
       return { content: [{ type: "text", text: JSON.stringify(toolList, null, 2) }] };
     }
@@ -1456,15 +1595,111 @@ export function registerProjectTools(server: McpServer) {
         return { content: [{ type: "text", text: typeof result === "string" ? result : JSON.stringify(result, null, 2) }] };
       } catch (error: any) {
         log("error", "call", tool, `Tool failed: ${error.message}`);
-        // Send ntfy for unexpected errors in critical tools
         const criticalTools = ["advance_stage", "start_research", "run_devteam_workflow", "create_agent_task"];
         if (criticalTools.includes(tool)) {
-          await ntfyError("call", tool, `Tool ${tool} failed: ${error.message}`, {
-            tool, params: Object.keys(params || {}),
-          });
+          await ntfyError("call", tool, `Tool ${tool} failed: ${error.message}`, { tool, params: Object.keys(params || {}) });
         }
         return { content: [{ type: "text", text: JSON.stringify({ error: error.message }) }], isError: true };
       }
     }
   );
+}
+
+
+// -- Exported HitL Handler (called from Express webhook route in index.ts) ----
+
+export async function handleReviewAction(
+  action: string, taskIdStr: string, reason: string | undefined, reviewerName: string
+): Promise<string> {
+  if (action === "list") {
+    const pending = await pgQuery(`SELECT at.id, at.prompt, at.created_at, pp.name as project_name FROM agent_tasks at JOIN pipeline_projects pp ON pp.id = at.project_id WHERE at.task_type = 'review' AND at.status = 'pending_review' ORDER BY at.created_at ASC`);
+    if (pending.rowCount === 0) return "No pending reviews.";
+    const reviewLines = pending.rows.map((r: any) => `- **#${r.id}** ${r.project_name}: ${r.prompt} (${new Date(r.created_at).toLocaleDateString()})`);
+    return `**Pending Reviews (${pending.rowCount}):**\n${reviewLines.join("\n")}`;
+  }
+
+  const taskId = parseInt(taskIdStr);
+  if (isNaN(taskId)) {
+    return "Invalid task ID. Usage: `/pipeline approve <task-id>` or `/pipeline reject <task-id> <reason>` or `/pipeline retry <task-id>` or `/pipeline list`";
+  }
+
+  const result = await pgQuery(`SELECT at.*, pp.slug, pp.name as project_name FROM agent_tasks at JOIN pipeline_projects pp ON pp.id = at.project_id WHERE at.id = $1 AND at.task_type = 'review'`, [taskId]);
+  if (result.rowCount === 0) return `Review task #${taskId} not found.`;
+  const task = result.rows[0];
+  const existingResult = task.result || {};
+
+  if (action === "approve") {
+    if (task.status !== "pending_review") return `Task #${taskId} is not pending review (current status: ${task.status}).`;
+
+    // Sprint-specific approval: promote code + merge
+    if (existingResult.review_type === "sprint" && existingResult.slug) {
+      const sprintRow = task.sprint_id ? (await pgQuery(`SELECT * FROM pipeline_sprints WHERE id = $1`, [task.sprint_id])).rows[0] : null;
+      if (sprintRow) {
+        const sandboxBranch = sprintRow.branch_name || `${existingResult.slug}/sprint-${sprintRow.sprint_number}`;
+        const targetBranch = `sprint-${sprintRow.sprint_number}`;
+        try {
+          const promoResult = await promoteCodeToProjectRepo(existingResult.slug, sandboxBranch, targetBranch);
+          log("info", "review", "promote", promoResult.message);
+          try { await mergeSprintDirect(existingResult.slug, targetBranch); } catch (mergeErr: any) {
+            log("error", "review", "merge", `Merge failed: ${mergeErr.message}`);
+            await mmPipelineUpdate(task.project_name, `Merge failed for sprint: ${mergeErr.message}. Resolve conflicts and retry.`, "x");
+            return `:warning: Sprint approved but merge failed: ${mergeErr.message}`;
+          }
+          await pgQuery(`UPDATE pipeline_sprints SET status = 'completed', completed_at = NOW() WHERE id = $1`, [sprintRow.id]);
+          await pgQuery(`UPDATE pipeline_projects SET actual_hours = (SELECT COALESCE(SUM(actual_hours), 0) FROM pipeline_sprints WHERE project_id = $1), updated_at = NOW() WHERE id = $1`, [task.project_id]);
+          await pgQuery(`INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`, [task.project_id, "sprint_completed", JSON.stringify({ sprint_number: sprintRow.sprint_number, branch: sandboxBranch })]);
+        } catch (promoteErr: any) {
+          log("error", "review", "promote", `Code promotion failed: ${promoteErr.message}`);
+          await mmPipelineUpdate(task.project_name, `Promotion failed: ${promoteErr.message}`, "x");
+          return `:warning: Sprint approved but promotion failed: ${promoteErr.message}`;
+        }
+      }
+    }
+
+    await pgQuery(`UPDATE agent_tasks SET status = 'completed', completed_at = NOW(), result = $1 WHERE id = $2`, [JSON.stringify({ ...existingResult, approved: true, reviewed_by: reviewerName, reviewed_at: new Date().toISOString() }), taskId]);
+    if (existingResult.mm_post_id) {
+      await mmUpdatePost(existingResult.mm_post_id, `### :white_check_mark: APPROVED: ${existingResult.title || "Review"}\n**Project:** ${task.project_name} (\`${task.slug}\`)\n**Approved by:** @${reviewerName}\n**Task ID:** \`${taskId}\``);
+    }
+    await mmPipelineUpdate(task.project_name, `Review #${taskId} approved by @${reviewerName}: ${existingResult.title || ""}`, "white_check_mark");
+    log("info", "review", "approve", `Task ${taskId} approved by ${reviewerName}`, { slug: task.slug });
+    return `:white_check_mark: Review #${taskId} approved! (${existingResult.title || task.prompt})`;
+
+  } else if (action === "reject") {
+    if (task.status !== "pending_review") return `Task #${taskId} is not pending review (current status: ${task.status}).`;
+    if (!reason) return "Please provide a rejection reason: \`/pipeline reject <task-id> <reason>\`";
+
+    await pgQuery(`UPDATE agent_tasks SET status = 'failed', completed_at = NOW(), result = $1 WHERE id = $2`, [JSON.stringify({ ...existingResult, approved: false, reviewed_by: reviewerName, reviewed_at: new Date().toISOString(), rejection_reason: reason }), taskId]);
+    if (existingResult.mm_post_id) {
+      await mmUpdatePost(existingResult.mm_post_id, `### :x: REJECTED: ${existingResult.title || "Review"}\n**Project:** ${task.project_name} (\`${task.slug}\`)\n**Rejected by:** @${reviewerName}\n**Reason:** ${reason}\n**Task ID:** \`${taskId}\``);
+    }
+    await mmPipelineUpdate(task.project_name, `Review #${taskId} rejected by @${reviewerName}: ${reason}`, "x");
+    log("info", "review", "reject", `Task ${taskId} rejected by ${reviewerName}: ${reason}`, { slug: task.slug });
+    return `:x: Review #${taskId} rejected. Reason: ${reason}`;
+
+  } else if (action === "retry") {
+    if (task.status !== "failed") return `Can only retry failed/rejected reviews. Task #${taskId} status: ${task.status}`;
+    const reviewType = existingResult.review_type;
+    const rejectionReason = existingResult.rejection_reason || reason || "No specific feedback";
+    const feedbackMsg = reason ? `${rejectionReason}\n\nAdditional notes: ${reason}` : rejectionReason;
+
+    if (reviewType === "sprint" && existingResult.slug) {
+      const projData = (await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [existingResult.slug])).rows[0];
+      if (!projData) return `Project ${existingResult.slug} not found.`;
+      const sprint = task.sprint_id ? (await pgQuery(`SELECT * FROM pipeline_sprints WHERE id = $1`, [task.sprint_id])).rows[0] : null;
+      if (sprint) {
+        await pgQuery(`UPDATE pipeline_sprints SET status = 'active' WHERE id = $1`, [sprint.id]);
+        await pgQuery(`UPDATE agent_tasks SET status = 'queued' WHERE id = $1`, [taskId]);
+        runSprintExecution(projData, sprint.sprint_number, feedbackMsg).catch(async (err) => {
+          log("error", "review", "retry", `Retry failed for sprint ${sprint.sprint_number}: ${err.message}`);
+          await ntfyError("review", "retry", `Sprint retry failed: ${err.message}`, { slug: existingResult.slug });
+        });
+        await mmPipelineUpdate(task.project_name, `Retrying sprint ${sprint.sprint_number} with feedback from review`, "arrows_counterclockwise");
+        return `:arrows_counterclockwise: Retrying sprint ${sprint.sprint_number} with feedback. New coding session starting...`;
+      }
+    }
+    return `Retry not supported for review type: ${reviewType}. Only sprint reviews can be retried.`;
+
+  } else {
+    return `Unknown action: \`${action}\`. Available: \`approve\`, \`reject\`, \`retry\`, \`list\`.\nUsage: \`/pipeline approve <task-id>\` or \`/pipeline reject <task-id> <reason>\` or \`/pipeline retry <task-id> [notes]\` or \`/pipeline list\``;
+  }
 }
