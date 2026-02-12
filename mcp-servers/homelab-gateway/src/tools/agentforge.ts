@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import pg from "pg";
 import neo4j, { Driver, Session } from "neo4j-driver";
-import { notify } from "../utils/notify.js";
+import { mmPost } from "./mm-notify.js";
 
 const { Pool } = pg;
 
@@ -38,7 +38,11 @@ function log(level: "info" | "warn" | "error", op: string, msg: string, meta?: R
   else console.log(`${prefix} ${msg}${metaStr}`);
 }
 
-const ntfyNotify = notify;
+async function ntfyNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
+  const emoji = tags?.length ? `:${tags[0]}: ` : "";
+  const titleStr = title ? `**${emoji}${title}**\n` : "";
+  await mmPost("dev-logs", `${titleStr}${message}`);
+}
 
 // --- PostgreSQL ---
 
@@ -1156,7 +1160,7 @@ Output ONLY the JSON object.`;
           mode: appConfig.mode || "workflow",
           description: appConfig.description || "",
           icon_type: "emoji",
-          icon: appConfig.icon || "🤖",
+          icon: appConfig.icon || "\u{1F916}",
           icon_background: "#FFEAD5",
         }),
       });
@@ -1319,14 +1323,14 @@ Output ONLY the JSON array.`;
 
       // Step 5: HitL Notification
       const notification = [
-        `📋 Project: ${project.name}`,
-        `✅ Reusable prompts: ${reusablePrompts.length} (${reusablePrompts.map((p: any) => p.name).join(", ") || "none"})`,
-        `🆕 New tools: ${newTools.length} (${newTools.map((t: any) => t.name).join(", ") || "none"})`,
-        `🕸️ LightRAG: ${lightragRecommended ? "YES" : "No"} (score: ${lightragScore}/4)`,
-        `📝 Prompts to create: ${gapCount}`,
-        `💰 Est. cost: $${estimatedCost.toFixed(2)}`,
+        `Project: ${project.name}`,
+        `Reusable prompts: ${reusablePrompts.length} (${reusablePrompts.map((p: any) => p.name).join(", ") || "none"})`,
+        `New tools: ${newTools.length} (${newTools.map((t: any) => t.name).join(", ") || "none"})`,
+        `LightRAG: ${lightragRecommended ? "YES" : "No"} (score: ${lightragScore}/4)`,
+        `Prompts to create: ${gapCount}`,
+        `Est. cost: $${estimatedCost.toFixed(2)}`,
         "",
-        "⏳ Awaiting approval...",
+        "Awaiting approval...",
       ].join("\n");
 
       await ntfyNotify(notification, "Resource Evaluation", 4, ["clipboard"]);

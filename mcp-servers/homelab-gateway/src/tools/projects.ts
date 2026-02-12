@@ -198,6 +198,179 @@ const DIFY_DEVTEAM_KEYS: Record<string, string> = {
 
 const DIFY_API_BASE = process.env.DIFY_API_BASE || "http://dify-api:5001";
 
+// Overwatch classification workflow
+const DIFY_OVERWATCH_KEY = process.env.DIFY_OVERWATCH_CLASSIFY_KEY || "";
+
+// Market Viability Dify workflow keys (6 sections)
+const DIFY_MARKET_KEYS: Record<string, string> = {
+  "tam-sam-som":           process.env.DIFY_MARKET_TAM_KEY || "",
+  "competitor-landscape":  process.env.DIFY_MARKET_COMPETITORS_KEY || "",
+  "differentiation":       process.env.DIFY_MARKET_DIFFERENTIATION_KEY || "",
+  "demand-validation":     process.env.DIFY_MARKET_DEMAND_KEY || "",
+  "pricing-strategy":      process.env.DIFY_MARKET_PRICING_KEY || "",
+  "market-timing":         process.env.DIFY_MARKET_TIMING_KEY || "",
+};
+
+// Marketing Strategy Dify workflow keys (6 sections)
+const DIFY_STRATEGY_KEYS: Record<string, string> = {
+  "go-to-market":      process.env.DIFY_STRATEGY_GTM_KEY || "",
+  "channel-selection":  process.env.DIFY_STRATEGY_CHANNELS_KEY || "",
+  "content-strategy":   process.env.DIFY_STRATEGY_CONTENT_KEY || "",
+  "social-media":       process.env.DIFY_STRATEGY_SOCIAL_KEY || "",
+  "campaign-design":    process.env.DIFY_STRATEGY_CAMPAIGNS_KEY || "",
+  "brand-positioning":  process.env.DIFY_STRATEGY_BRAND_KEY || "",
+};
+
+// Market/Strategy Report Compiler
+const DIFY_REPORT_KEY = process.env.DIFY_MARKET_STRATEGY_REPORT_KEY || "";
+
+// Automation Design Dify workflow keys (5 sections)
+const DIFY_AUTO_KEYS: Record<string, string> = {
+  "workflow-design":       process.env.DIFY_AUTO_WORKFLOW_KEY || "",
+  "tool-selection":        process.env.DIFY_AUTO_TOOLS_KEY || "",
+  "integration-mapping":   process.env.DIFY_AUTO_INTEGRATION_KEY || "",
+  "trigger-action-arch":   process.env.DIFY_AUTO_TRIGGERS_KEY || "",
+  "guardrail-design":      process.env.DIFY_AUTO_GUARDRAILS_KEY || "",
+};
+
+// Agent Pipeline Dify workflow keys (4 sections)
+const DIFY_AGENT_KEYS: Record<string, string> = {
+  "agent-discovery":       process.env.DIFY_AGENT_DISCOVERY_KEY || "",
+  "prompt-audit":          process.env.DIFY_AGENT_PROMPT_AUDIT_KEY || "",
+  "lightrag-assessment":   process.env.DIFY_AGENT_LIGHTRAG_KEY || "",
+  "agent-scaffolding":     process.env.DIFY_AGENT_SCAFFOLDING_KEY || "",
+};
+
+// Product Launch Dify workflow keys (4 sections)
+const DIFY_LAUNCH_KEYS: Record<string, string> = {
+  "marketplace-setup":  process.env.DIFY_LAUNCH_MARKETPLACE_KEY || "",
+  "landing-page":       process.env.DIFY_LAUNCH_LANDING_KEY || "",
+  "pricing-config":     process.env.DIFY_LAUNCH_PRICING_KEY || "",
+  "distribution":       process.env.DIFY_LAUNCH_DISTRIBUTION_KEY || "",
+};
+
+// -- Module Registry ----------------------------------------------------------
+
+interface ModuleDef {
+  id: string;
+  displayName: string;
+  category: "research" | "design" | "strategy" | "build" | "launch";
+  dependsOn: string[];
+  softDependsOn?: string[];
+  sections: string[];
+  difyKeys: Record<string, string>;
+  hitlGate?: boolean;
+  coercedBy?: string[];
+  reInvocable?: boolean;
+}
+
+const MODULE_REGISTRY: Record<string, ModuleDef> = {
+  "tech-research": {
+    id: "tech-research", displayName: "Technical Research", category: "research",
+    dependsOn: [],
+    sections: ["libraries","security","ui-ux-research","architecture","dependencies",
+               "file-structure","tools","containers","integration","costs",
+               "open-source-scan","best-practices","prior-art"],
+    difyKeys: DIFY_SECTION_KEYS,
+  },
+  "market-viability": {
+    id: "market-viability", displayName: "Market Viability", category: "research",
+    dependsOn: [],
+    sections: ["tam-sam-som","competitor-landscape","differentiation",
+               "demand-validation","pricing-strategy","market-timing"],
+    difyKeys: DIFY_MARKET_KEYS,
+  },
+  "marketing-strategy": {
+    id: "marketing-strategy", displayName: "Marketing Strategy", category: "strategy",
+    dependsOn: [],
+    softDependsOn: ["market-viability"],
+    coercedBy: ["market-viability"],
+    sections: ["go-to-market","channel-selection","content-strategy",
+               "social-media","campaign-design","brand-positioning"],
+    difyKeys: DIFY_STRATEGY_KEYS,
+  },
+  "automation-design": {
+    id: "automation-design", displayName: "Automation Design", category: "design",
+    dependsOn: [],
+    sections: ["workflow-design","tool-selection","integration-mapping",
+               "trigger-action-arch","guardrail-design"],
+    difyKeys: DIFY_AUTO_KEYS,
+  },
+  "agent-pipeline": {
+    id: "agent-pipeline", displayName: "Agent Pipeline", category: "design",
+    dependsOn: [],
+    softDependsOn: ["automation-design"],
+    coercedBy: ["tech-research", "automation-design"],
+    sections: ["agent-discovery","prompt-audit","lightrag-assessment","agent-scaffolding"],
+    difyKeys: DIFY_AGENT_KEYS,
+    reInvocable: true,
+  },
+  "architecture": {
+    id: "architecture", displayName: "Architecture", category: "design",
+    dependsOn: ["tech-research"],
+    sections: ["architecture-design"],
+    difyKeys: DIFY_DEVTEAM_KEYS,
+  },
+  "security-review": {
+    id: "security-review", displayName: "Security Review", category: "design",
+    dependsOn: ["architecture"],
+    sections: ["security-assessment"],
+    difyKeys: DIFY_DEVTEAM_KEYS,
+  },
+  "war-room": {
+    id: "war-room", displayName: "War Room", category: "design",
+    dependsOn: [],
+    sections: ["war-room-debate"],
+    difyKeys: {},
+    hitlGate: true,
+  },
+  "sprint-planning": {
+    id: "sprint-planning", displayName: "Sprint Planning", category: "build",
+    dependsOn: ["architecture", "security-review"],
+    sections: ["sow-generation", "sprint-decomposition"],
+    difyKeys: DIFY_DEVTEAM_KEYS,
+  },
+  "sprint-build": {
+    id: "sprint-build", displayName: "Sprint Build", category: "build",
+    dependsOn: ["sprint-planning"],
+    sections: [],
+    difyKeys: {},
+  },
+  "product-launch": {
+    id: "product-launch", displayName: "Product Launch", category: "launch",
+    dependsOn: ["sprint-build"],
+    sections: ["marketplace-setup","landing-page","pricing-config","distribution"],
+    difyKeys: DIFY_LAUNCH_KEYS,
+    hitlGate: true,
+  },
+};
+
+// Map of module sections to preference search queries (extends existing SECTION_PREF_QUERIES)
+const MODULE_PREF_QUERIES: Record<string, string> = {
+  ...SECTION_PREF_QUERIES,
+  "tam-sam-som":          "market size total addressable market opportunity",
+  "competitor-landscape": "competitors competitive analysis market positioning",
+  "differentiation":      "differentiation unique selling proposition competitive advantage",
+  "demand-validation":    "demand validation customer research market need",
+  "pricing-strategy":     "pricing model subscription freemium monetization",
+  "market-timing":        "market timing launch strategy window opportunity",
+  "go-to-market":         "go to market strategy launch plan",
+  "channel-selection":    "marketing channels distribution customer acquisition",
+  "content-strategy":     "content marketing strategy blog social media",
+  "social-media":         "social media marketing platform engagement",
+  "campaign-design":      "marketing campaign design advertising",
+  "brand-positioning":    "brand positioning identity messaging",
+  "workflow-design":      "workflow automation design process",
+  "tool-selection":       "automation tools selection evaluation",
+  "integration-mapping":  "integration mapping API connections",
+  "trigger-action-arch":  "trigger action architecture event-driven",
+  "guardrail-design":     "guardrails safety limits automation controls",
+  "agent-discovery":      "AI agents discovery capabilities needed",
+  "prompt-audit":         "prompt engineering library audit optimization",
+  "lightrag-assessment":  "LightRAG knowledge base assessment",
+  "agent-scaffolding":    "agent scaffolding creation deployment",
+};
+
 async function callDify(apiKey: string, inputs: Record<string, string>, workflowName?: string): Promise<any> {
   const startTime = Date.now();
   const label = workflowName || apiKey.slice(0, 12);
@@ -772,6 +945,525 @@ async function monitorCodingSession(project: any, sprintRow: any, conversationId
 }
 
 
+// -- Module Engine -----------------------------------------------------------
+
+/**
+ * Resolve which modules are ready to start given current active modules and their statuses.
+ * A module is "ready" if:
+ * 1. It's in the active_modules list
+ * 2. Its status is 'pending'
+ * 3. All hard deps (dependsOn) that are ALSO in active_modules are 'complete'
+ * 4. All soft deps (softDependsOn) that are ALSO in active_modules are 'complete'
+ */
+function getReadyModules(activeModules: string[], moduleStatuses: Record<string, string>): string[] {
+  const ready: string[] = [];
+  for (const modId of activeModules) {
+    const def = MODULE_REGISTRY[modId];
+    if (!def) continue;
+    if (moduleStatuses[modId] !== "pending") continue;
+
+    // Check hard deps — only those that are also active
+    const hardDepsOk = def.dependsOn.every(dep =>
+      !activeModules.includes(dep) || moduleStatuses[dep] === "complete"
+    );
+    if (!hardDepsOk) continue;
+
+    // Check soft deps — only those that are also active
+    const softDepsOk = (def.softDependsOn || []).every(dep =>
+      !activeModules.includes(dep) || moduleStatuses[dep] === "complete"
+    );
+    if (!softDepsOk) continue;
+
+    ready.push(modId);
+  }
+  return ready;
+}
+
+/**
+ * Apply coercion rules to a set of active modules.
+ * Returns the expanded set with coerced modules added.
+ */
+function applyCoercionRules(modules: string[]): string[] {
+  const result = new Set(modules);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [modId, def] of Object.entries(MODULE_REGISTRY)) {
+      if (result.has(modId)) continue;
+      if (def.coercedBy && def.coercedBy.some(trigger => result.has(trigger))) {
+        result.add(modId);
+        changed = true;
+      }
+    }
+  }
+  return Array.from(result);
+}
+
+/**
+ * Derive the legacy stage field from module progress.
+ * Maps module states to the closest legacy stage for backward compat.
+ */
+function deriveStage(moduleProgress: Record<string, string>, activeModules: string[]): string {
+  if (activeModules.length === 0) return "queue";
+
+  const statuses = activeModules.map(m => moduleProgress[m] || "pending");
+  const allComplete = statuses.every(s => s === "complete" || s === "skipped");
+  if (allComplete) return "completed";
+
+  // Check what's currently in_progress or complete to derive stage
+  const inProgressOrComplete = activeModules.filter(m =>
+    moduleProgress[m] === "in_progress" || moduleProgress[m] === "complete"
+  );
+
+  if (inProgressOrComplete.some(m => m === "sprint-build")) return "active";
+  if (inProgressOrComplete.some(m => m === "sprint-planning")) return "planning";
+  if (inProgressOrComplete.some(m => m === "security-review")) return "security_review";
+  if (inProgressOrComplete.some(m => m === "architecture" || m === "war-room")) return "architecture";
+  if (inProgressOrComplete.some(m => MODULE_REGISTRY[m]?.category === "research" || MODULE_REGISTRY[m]?.category === "strategy" || MODULE_REGISTRY[m]?.category === "design")) return "research";
+
+  return "research";
+}
+
+/**
+ * Generic module pipeline runner. Processes all sections of a module sequentially
+ * via Dify workflows, storing results in pipeline_research.
+ */
+async function runModulePipeline(
+  project: { id: number; slug: string; name: string; description: string | null },
+  moduleId: string
+): Promise<void> {
+  const moduleDef = MODULE_REGISTRY[moduleId];
+  if (!moduleDef) throw new Error(`Unknown module: ${moduleId}`);
+
+  log("info", "module", moduleId, `Starting module pipeline for ${project.slug}`);
+
+  // Mark module as in_progress
+  await pgQuery(
+    `UPDATE pipeline_module_runs SET status = 'in_progress', started_at = NOW(), updated_at = NOW()
+     WHERE project_id = $1 AND module_id = $2`,
+    [project.id, moduleId]
+  );
+  await pgQuery(
+    `UPDATE pipeline_projects SET module_progress = module_progress || $1, updated_at = NOW() WHERE id = $2`,
+    [JSON.stringify({ [moduleId]: "in_progress" }), project.id]
+  );
+
+  await mmPipelineUpdate(project.name, `Module **${moduleDef.displayName}** started`, "gear");
+
+  // Special handling: war-room uses existing startAndRunWarRoom, not section-by-section Dify
+  if (moduleId === "war-room") {
+    try {
+      await startAndRunWarRoom(project.id);
+      await advanceModule(project, moduleId);
+    } catch (err: any) {
+      await failModule(project, moduleId, err.message);
+    }
+    return;
+  }
+
+  // Special handling: sprint-build uses existing runSprintExecution
+  if (moduleId === "sprint-build") {
+    // Auto-start sprint 1 (or next pending sprint)
+    try {
+      const nextSprint = await pgQuery(
+        `SELECT sprint_number FROM pipeline_sprints WHERE project_id = $1 AND status = 'pending' ORDER BY sprint_number ASC LIMIT 1`,
+        [project.id]
+      );
+      if (nextSprint.rowCount > 0) {
+        const projFull = (await pgQuery(`SELECT * FROM pipeline_projects WHERE id = $1`, [project.id])).rows[0];
+        await runSprintExecution(projFull, nextSprint.rows[0].sprint_number);
+      }
+      // Don't call advanceModule here — sprint monitor handles completion
+    } catch (err: any) {
+      await failModule(project, moduleId, err.message);
+    }
+    return;
+  }
+
+  // Special handling: sprint-planning uses existing SoW + sprint decomposition flow
+  if (moduleId === "sprint-planning") {
+    try {
+      // Gather context
+      const research = await pgQuery(
+        `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
+        [project.id]
+      );
+      const archFindings = research.rows.find((r: any) => r.section === "architecture-design")?.findings || "";
+      const secFindings = research.rows.find((r: any) => r.section === "security-assessment")?.findings || "";
+      const allFindings = research.rows.map((r: any) => `## ${r.section}\n${typeof r.findings === "string" ? r.findings : JSON.stringify(r.findings)}`).join("\n\n");
+
+      // Generate SoW via Dify
+      const sowKey = DIFY_DEVTEAM_KEYS["pm-generate-sow"];
+      if (sowKey && sowKey.startsWith("app-")) {
+        const sowResult = await callDify(sowKey, {
+          project_name: project.name,
+          project_description: project.description || "",
+          research_findings: allFindings.slice(0, 30000),
+          architecture: (typeof archFindings === "string" ? archFindings : JSON.stringify(archFindings)).slice(0, 15000),
+          security_findings: (typeof secFindings === "string" ? secFindings : JSON.stringify(secFindings)).slice(0, 10000),
+        }, "pm-generate-sow");
+
+        if (sowResult?.data?.status === "succeeded") {
+          const sowOutput = sowResult.data.outputs?.result || sowResult.data.outputs;
+          let sowData: any;
+          try { sowData = typeof sowOutput === "string" ? JSON.parse(sowOutput) : sowOutput; } catch { sowData = { raw: sowOutput }; }
+          await pgQuery(`UPDATE pipeline_projects SET scope_of_work = $1, updated_at = NOW() WHERE id = $2`, [JSON.stringify(sowData), project.id]);
+
+          // Parse sprints from SoW
+          const sprints = parseSowIntoSprints(sowData);
+          for (let i = 0; i < sprints.length; i++) {
+            const s = sprints[i];
+            const sprintNumber = s.sprint_number || s.number || i + 1;
+            const name = s.name || s.title || `Sprint ${sprintNumber}`;
+            const tasks = s.tasks || s.deliverables || s.items || [];
+            await pgQuery(
+              `INSERT INTO pipeline_sprints (project_id, sprint_number, name, description, tasks, estimated_hours, estimated_loc, complexity)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               ON CONFLICT (project_id, sprint_number) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description, tasks = EXCLUDED.tasks`,
+              [project.id, sprintNumber, name, s.description || null, tasks.length > 0 ? JSON.stringify(tasks) : null, s.estimated_hours || null, s.estimated_loc || null, s.complexity || null]
+            );
+          }
+
+          // Store SoW section
+          await pgQuery(
+            `INSERT INTO pipeline_research (project_id, section, findings, status)
+             VALUES ($1, 'sow-generation', $2, 'complete')
+             ON CONFLICT (project_id, section) DO UPDATE SET findings = $2, status = 'complete', updated_at = NOW()`,
+            [project.id, JSON.stringify(sowData)]
+          );
+
+          await mmDeliverable(project.name, "Scope of Work", typeof sowOutput === "string" ? sowOutput : JSON.stringify(sowOutput, null, 2), "sow");
+        }
+      }
+      await advanceModule(project, moduleId);
+    } catch (err: any) {
+      await failModule(project, moduleId, err.message);
+    }
+    return;
+  }
+
+  // Standard section-by-section Dify pipeline
+  const serverContext = "Unraid Tower server with Docker, Traefik reverse proxy, PostgreSQL, Neo4j, n8n, Dify";
+  let completedCount = 0;
+  const totalSections = moduleDef.sections.length;
+  const accumulatedFindings: Record<string, any> = {};
+
+  // Load user preferences
+  let projectPreferences: any[] = [];
+  try {
+    projectPreferences = await searchPreferences(
+      `${project.name} ${project.description || ""} ${moduleDef.displayName}`,
+      15
+    );
+  } catch { /* use empty */ }
+
+  // Load findings from other completed modules for cross-module context
+  const existingResearch = await pgQuery(
+    `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
+    [project.id]
+  );
+  for (const row of existingResearch.rows) {
+    if (row.findings) {
+      accumulatedFindings[row.section] = { findings: row.findings };
+    }
+  }
+
+  for (const section of moduleDef.sections) {
+    try {
+      const apiKey = moduleDef.difyKeys[section];
+      if (!apiKey || !apiKey.startsWith("app-")) {
+        log("warn", "module", section, `No Dify API key for ${moduleId}/${section} — skipping`);
+        await pgQuery(
+          `UPDATE pipeline_research SET status = 'skipped', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+          [project.id, section]
+        );
+        completedCount++;
+        continue;
+      }
+
+      // Mark section in_progress
+      await pgQuery(
+        `UPDATE pipeline_research SET status = 'in_progress', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+        [project.id, section]
+      );
+
+      // Get section-specific preferences
+      let sectionPreferences = projectPreferences;
+      const prefQuery = MODULE_PREF_QUERIES[section];
+      if (prefQuery) {
+        try {
+          const sectionSpecific = await searchPreferences(prefQuery, 10);
+          const seen = new Set(sectionPreferences.map((p: any) => p.id));
+          for (const sp of sectionSpecific) {
+            if (!seen.has(sp.id)) {
+              sectionPreferences = [...sectionPreferences, sp];
+              seen.add(sp.id);
+            }
+          }
+        } catch { /* use base */ }
+      }
+
+      const inputs: Record<string, string> = {
+        project_name: project.name,
+        project_description: project.description || "",
+        section,
+        server_context: serverContext,
+        existing_findings: Object.keys(accumulatedFindings).length > 0
+          ? JSON.stringify(accumulatedFindings) : "",
+        user_preferences: sectionPreferences.length > 0
+          ? JSON.stringify(sectionPreferences.map((p: any) => ({
+              domain: p.domain, topic: p.topic, context: p.context,
+              preference: p.preference, anti_pattern: p.anti_pattern,
+              examples: p.examples, confidence: p.confidence,
+            }))) : "",
+      };
+
+      const difyResponse = await callDify(apiKey, inputs, `${moduleId}-${section}`);
+
+      const data = difyResponse?.data;
+      if (!data || data.status !== "succeeded") {
+        const errMsg = data?.error || "Dify workflow did not succeed";
+        log("error", "module", section, `Dify failed for ${project.slug}/${moduleId}: ${errMsg}`);
+        await pgQuery(
+          `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+          [project.id, section]
+        );
+        continue;
+      }
+
+      // Parse result
+      let findings: any = null;
+      let concerns: string[] = [];
+      let recommendations: string[] = [];
+      let confidenceScore: number | null = null;
+      let questions: Array<{ question: string; context: string; priority: string }> = [];
+
+      const resultRaw = data.outputs?.result;
+      if (resultRaw) {
+        try {
+          const parsed = typeof resultRaw === "string" ? JSON.parse(resultRaw) : resultRaw;
+          findings = parsed.findings ?? null;
+          concerns = Array.isArray(parsed.concerns) ? parsed.concerns : [];
+          recommendations = Array.isArray(parsed.recommendations) ? parsed.recommendations : [];
+          confidenceScore = typeof parsed.confidence_score === "number" ? parsed.confidence_score : null;
+          questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+        } catch {
+          findings = { raw: resultRaw };
+        }
+      }
+
+      if (findings) {
+        accumulatedFindings[section] = { findings, concerns, recommendations, confidence_score: confidenceScore };
+      }
+
+      await pgQuery(
+        `UPDATE pipeline_research
+         SET findings = $1, concerns = $2, recommendations = $3, confidence_score = $4, status = 'complete', updated_at = NOW()
+         WHERE project_id = $5 AND section = $6`,
+        [findings ? JSON.stringify(findings) : null, concerns, recommendations, confidenceScore, project.id, section]
+      );
+
+      for (const q of questions) {
+        try {
+          await pgQuery(
+            `INSERT INTO pipeline_questions (project_id, question, context, priority) VALUES ($1, $2, $3, $4)`,
+            [project.id, q.question, q.context || null, q.priority || "normal"]
+          );
+        } catch { /* ignore dup */ }
+      }
+
+      completedCount++;
+      const elapsed = data.elapsed_time ? `${data.elapsed_time.toFixed(1)}s` : "?";
+      const tokens = data.total_tokens || "?";
+
+      await ntfyNotify(
+        `${project.name} / ${moduleDef.displayName} / ${section} (${elapsed}, ${tokens} tokens). ${completedCount}/${totalSections}`,
+        "Module Section Done", 3, ["microscope"]
+      );
+
+    } catch (err: any) {
+      log("error", "module", section, `Error in ${project.slug}/${moduleId}/${section}: ${err.message}`);
+      try {
+        await pgQuery(
+          `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+          [project.id, section]
+        );
+      } catch { /* ignore */ }
+    }
+  }
+
+  // Module complete
+  const failedCount = totalSections - completedCount;
+  if (failedCount > 0) {
+    log("warn", "module", moduleId, `Module ${moduleId} for ${project.slug}: ${completedCount}/${totalSections} sections succeeded`);
+  }
+
+  await pgQuery(
+    `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
+    [project.id, "module_complete", JSON.stringify({ module: moduleId, completed: completedCount, failed: failedCount, total: totalSections })]
+  );
+
+  // Check if this module should produce a deliverable report
+  if (moduleId === "market-viability" || moduleId === "marketing-strategy") {
+    await tryCompileMarketStrategyReport(project, moduleId);
+  }
+
+  await advanceModule(project, moduleId);
+}
+
+/**
+ * Compile market/strategy report when appropriate modules complete.
+ * - Both market-viability + marketing-strategy complete → combined report
+ * - Only marketing-strategy complete (standalone) → strategy-only report
+ */
+async function tryCompileMarketStrategyReport(
+  project: { id: number; slug: string; name: string; description: string | null },
+  justCompleted: string
+): Promise<void> {
+  const projRow = (await pgQuery(`SELECT active_modules, module_progress FROM pipeline_projects WHERE id = $1`, [project.id])).rows[0];
+  const activeModules: string[] = projRow?.active_modules || [];
+  const progress: Record<string, string> = projRow?.module_progress || {};
+
+  const marketActive = activeModules.includes("market-viability");
+  const strategyActive = activeModules.includes("marketing-strategy");
+  const marketDone = progress["market-viability"] === "complete";
+  const strategyDone = progress["marketing-strategy"] === "complete";
+
+  // Only compile when all active market/strategy modules are done
+  if (marketActive && !marketDone) return;
+  if (strategyActive && !strategyDone) return;
+  if (!marketActive && !strategyActive) return;
+
+  const mode = marketActive ? "combined" : "strategy-only";
+
+  // Gather all findings from market + strategy sections
+  const sections = [
+    ...(marketActive ? MODULE_REGISTRY["market-viability"].sections : []),
+    ...(strategyActive ? MODULE_REGISTRY["marketing-strategy"].sections : []),
+  ];
+
+  const research = await pgQuery(
+    `SELECT section, findings, concerns, recommendations FROM pipeline_research
+     WHERE project_id = $1 AND section = ANY($2) AND status = 'complete'`,
+    [project.id, sections]
+  );
+
+  const findingsText = research.rows.map((r: any) =>
+    `## ${r.section}\n${typeof r.findings === "string" ? r.findings : JSON.stringify(r.findings)}`
+  ).join("\n\n");
+
+  // Try to compile via Dify if key is configured
+  if (DIFY_REPORT_KEY && DIFY_REPORT_KEY.startsWith("app-")) {
+    try {
+      const result = await callDify(DIFY_REPORT_KEY, {
+        project_name: project.name,
+        project_description: project.description || "",
+        mode,
+        findings: findingsText.slice(0, 30000),
+      }, "market-strategy-report");
+
+      if (result?.data?.status === "succeeded") {
+        const report = result.data.outputs?.result || findingsText;
+        const title = mode === "combined" ? "Market & Strategy Report" : "Marketing Strategy Report";
+        await mmDeliverable(project.name, title, typeof report === "string" ? report : JSON.stringify(report, null, 2), "research");
+        return;
+      }
+    } catch (err: any) {
+      log("warn", "module", "report", `Report compilation failed, posting raw: ${err.message}`);
+    }
+  }
+
+  // Fallback: post raw findings as deliverable
+  const title = mode === "combined" ? "Market & Strategy Report" : "Marketing Strategy Report";
+  await mmDeliverable(project.name, title, findingsText, "research");
+}
+
+/**
+ * Called when a module completes. Updates status, finds newly-unblocked modules, and starts them.
+ */
+async function advanceModule(
+  project: { id: number; slug: string; name: string; description: string | null },
+  moduleId: string
+): Promise<void> {
+  log("info", "module", "advance", `Module ${moduleId} complete for ${project.slug}`);
+
+  // Mark module complete
+  await pgQuery(
+    `UPDATE pipeline_module_runs SET status = 'complete', completed_at = NOW(), updated_at = NOW()
+     WHERE project_id = $1 AND module_id = $2`,
+    [project.id, moduleId]
+  );
+  await pgQuery(
+    `UPDATE pipeline_projects SET module_progress = module_progress || $1, updated_at = NOW() WHERE id = $2`,
+    [JSON.stringify({ [moduleId]: "complete" }), project.id]
+  );
+
+  await mmPipelineUpdate(project.name, `Module **${MODULE_REGISTRY[moduleId]?.displayName || moduleId}** complete`, "white_check_mark");
+
+  // Load current state
+  const projRow = (await pgQuery(`SELECT active_modules, module_progress FROM pipeline_projects WHERE id = $1`, [project.id])).rows[0];
+  const activeModules: string[] = projRow.active_modules || [];
+  const moduleProgress: Record<string, string> = { ...(projRow.module_progress || {}), [moduleId]: "complete" };
+
+  // Derive and update stage
+  const newStage = deriveStage(moduleProgress, activeModules);
+  await pgQuery(`UPDATE pipeline_projects SET stage = $1, updated_at = NOW() WHERE id = $2`, [newStage, project.id]);
+
+  // Find newly ready modules
+  const readyModules = getReadyModules(activeModules, moduleProgress);
+
+  for (const readyMod of readyModules) {
+    const def = MODULE_REGISTRY[readyMod];
+
+    // Check HitL gate
+    if (def?.hitlGate) {
+      await mmPostWithId("human-review",
+        `### :gate: HitL Gate: ${def.displayName}\n**Project:** ${project.name} (\`${project.slug}\`)\n\nModule **${def.displayName}** is ready to start but requires human approval.\n\n:white_check_mark: Use \`classify_project\` → \`start_module\` to proceed.`
+      );
+      log("info", "module", "hitl", `Module ${readyMod} gated for HitL — awaiting approval`);
+      continue;
+    }
+
+    // Auto-start ready module
+    log("info", "module", "auto-start", `Auto-starting module ${readyMod} for ${project.slug}`);
+    startModuleAsync(project, readyMod);
+  }
+}
+
+/**
+ * Mark a module as failed.
+ */
+async function failModule(
+  project: { id: number; slug: string; name: string; description: string | null },
+  moduleId: string,
+  error: string
+): Promise<void> {
+  log("error", "module", moduleId, `Module ${moduleId} failed for ${project.slug}: ${error}`);
+  await pgQuery(
+    `UPDATE pipeline_module_runs SET status = 'failed', error = $1, updated_at = NOW()
+     WHERE project_id = $2 AND module_id = $3`,
+    [error, project.id, moduleId]
+  );
+  await pgQuery(
+    `UPDATE pipeline_projects SET module_progress = module_progress || $1, updated_at = NOW() WHERE id = $2`,
+    [JSON.stringify({ [moduleId]: "failed" }), project.id]
+  );
+  await ntfyError("module", moduleId, `Module ${moduleId} failed for ${project.slug}: ${error}`, { slug: project.slug });
+}
+
+/**
+ * Fire-and-forget module start with error handling.
+ */
+function startModuleAsync(
+  project: { id: number; slug: string; name: string; description: string | null },
+  moduleId: string
+): void {
+  runModulePipeline(project, moduleId).catch(async (err) => {
+    await failModule(project, moduleId, err.message);
+  });
+}
+
+
 // --- Sub-tools ---
 
 const tools: Record<string, {
@@ -914,12 +1606,28 @@ const tools: Record<string, {
   },
 
   advance_stage: {
-    description: "Move project to next stage with validation gates. queue->research->architecture->security_review->planning->active->completed.",
+    description: "Move project to next stage with validation gates. For legacy (non-Overwatch) projects: queue->research->architecture->security_review->planning->active->completed. For Overwatch projects, use get_module_status instead.",
     params: { slug: "Project slug" },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
       if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
       const project = proj.rows[0];
+
+      // Overwatch projects use module engine — advance_stage delegates to deriveStage
+      if (project.overwatch_approved) {
+        const activeModules: string[] = project.active_modules || [];
+        const moduleProgress: Record<string, string> = project.module_progress || {};
+        const derivedStage = deriveStage(moduleProgress, activeModules);
+        if (derivedStage !== project.stage) {
+          await pgQuery(
+            `UPDATE pipeline_projects SET stage = $1, updated_at = NOW() WHERE id = $2`,
+            [derivedStage, project.id]
+          );
+          await mmPipelineUpdate(project.name, `Stage derived: ${project.stage} → ${derivedStage}`, "arrow_right");
+          return { ...project, stage: derivedStage, message: "Stage derived from module progress (Overwatch mode)" };
+        }
+        return { ...project, message: `Stage is already '${project.stage}'. Module progress drives stage in Overwatch mode. Use get_module_status for details.` };
+      }
 
       const currentIdx = STAGE_ORDER.indexOf(project.stage);
       if (currentIdx === -1 || currentIdx >= STAGE_ORDER.length - 1) {
@@ -1556,6 +2264,447 @@ const tools: Record<string, {
       return { pending_reviews: result.rows.map((r: any) => ({ task_id: r.id, slug: r.slug, project: r.project_name, title: r.result?.title, review_type: r.result?.review_type, created_at: r.created_at })), count: result.rowCount };
     },
   },
+
+  // -- Overwatch Agent (Project Classification & Module Routing) ---------------
+
+  classify_project: {
+    description: "Classify a project using the Overwatch agent. Analyzes project idea and selects which pipeline modules to activate. Project must be in 'queue' stage. Posts classification to #human-review for approval.",
+    params: {
+      slug: "Project slug",
+    },
+    handler: async (p) => {
+      const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+      const project = proj.rows[0];
+
+      if (project.stage !== "queue") {
+        throw new Error(`Project must be in 'queue' stage to classify (current: ${project.stage})`);
+      }
+      if (project.overwatch_approved) {
+        throw new Error(`Project already classified and approved`);
+      }
+
+      // Build module descriptions for the LLM
+      const moduleDescriptions = Object.entries(MODULE_REGISTRY).map(([id, def]) => {
+        const deps = def.dependsOn.length > 0 ? ` (depends on: ${def.dependsOn.join(", ")})` : "";
+        const coerced = def.coercedBy ? ` [auto-included when: ${def.coercedBy.join(" or ")}]` : "";
+        return `- **${id}** (${def.displayName}): ${def.category} module, ${def.sections.length} sections${deps}${coerced}`;
+      }).join("\n");
+
+      let classification: any;
+
+      // Try Dify overwatch-classify workflow
+      if (DIFY_OVERWATCH_KEY && DIFY_OVERWATCH_KEY.startsWith("app-")) {
+        try {
+          const result = await callDify(DIFY_OVERWATCH_KEY, {
+            project_name: project.name,
+            project_description: project.description || "",
+            project_tags: JSON.stringify(project.tags || []),
+            available_modules: moduleDescriptions,
+          }, "overwatch-classify");
+
+          if (result?.data?.status === "succeeded") {
+            const raw = result.data.outputs?.result;
+            try {
+              classification = typeof raw === "string" ? JSON.parse(raw) : raw;
+            } catch {
+              classification = { raw, error: "Failed to parse classification JSON" };
+            }
+          }
+        } catch (err: any) {
+          log("warn", "overwatch", "classify", `Dify classification failed, using heuristic: ${err.message}`);
+        }
+      }
+
+      // Fallback heuristic classification if Dify not available
+      if (!classification || !classification.active_modules) {
+        const desc = (project.description || "").toLowerCase();
+        const tags = (project.tags || []).map((t: string) => t.toLowerCase());
+        const allText = `${desc} ${tags.join(" ")}`;
+
+        let projectType = "personal-tool";
+        let revenueModel = "none";
+        let deliverableType = "software";
+        let activeModules: string[] = ["tech-research", "architecture", "security-review", "sprint-planning", "sprint-build"];
+
+        if (allText.includes("client") || allText.includes("freelance") || allText.includes("contract")) {
+          projectType = "client-work";
+          revenueModel = "client-billing";
+        }
+        if (allText.includes("saas") || allText.includes("product") || allText.includes("gumroad") || allText.includes("marketplace")) {
+          projectType = "market-product";
+          revenueModel = "subscription";
+          activeModules = ["tech-research", "market-viability", "architecture", "security-review", "sprint-planning", "sprint-build", "product-launch"];
+        }
+        if (allText.includes("automat") || allText.includes("workflow") || allText.includes("n8n") || allText.includes("bot")) {
+          deliverableType = "automation";
+          if (projectType === "personal-tool") {
+            activeModules = ["automation-design", "sprint-planning", "sprint-build"];
+          }
+        }
+        if (allText.includes("marketing") || allText.includes("social media") || allText.includes("campaign")) {
+          if (!activeModules.includes("marketing-strategy")) {
+            activeModules.push("marketing-strategy");
+          }
+        }
+
+        classification = {
+          project_type: projectType,
+          revenue_model: revenueModel,
+          deliverable_type: deliverableType,
+          active_modules: activeModules,
+          reasoning: "Heuristic classification (Dify overwatch workflow not configured)",
+          estimated_hours: null,
+          risk_level: "medium",
+        };
+      }
+
+      // Apply coercion rules
+      const expandedModules = applyCoercionRules(classification.active_modules || []);
+      classification.active_modules = expandedModules;
+
+      // Store classification
+      await pgQuery(
+        `UPDATE pipeline_projects SET
+          overwatch_classification = $1,
+          project_type = $2,
+          revenue_model = $3,
+          deliverable_type = $4,
+          active_modules = $5,
+          updated_at = NOW()
+         WHERE id = $6`,
+        [
+          JSON.stringify(classification),
+          classification.project_type || "personal-tool",
+          classification.revenue_model || "none",
+          classification.deliverable_type || "software",
+          JSON.stringify(expandedModules),
+          project.id,
+        ]
+      );
+
+      // Create pipeline_module_runs rows
+      for (const modId of expandedModules) {
+        const def = MODULE_REGISTRY[modId];
+        if (!def) continue;
+        await pgQuery(
+          `INSERT INTO pipeline_module_runs (project_id, module_id, status)
+           VALUES ($1, $2, 'pending')
+           ON CONFLICT (project_id, module_id) DO NOTHING`,
+          [project.id, modId]
+        );
+        // Create pipeline_research rows for each section
+        for (const section of def.sections) {
+          await pgQuery(
+            `INSERT INTO pipeline_research (project_id, section)
+             VALUES ($1, $2)
+             ON CONFLICT (project_id, section) DO NOTHING`,
+            [project.id, section]
+          );
+        }
+      }
+
+      // Post to Mattermost for review
+      const moduleList = expandedModules.map(m => {
+        const def = MODULE_REGISTRY[m];
+        return `- **${m}** (${def?.displayName || m}) — ${def?.sections.length || 0} sections`;
+      }).join("\n");
+
+      await mmPostWithId("human-review",
+        `### :telescope: Overwatch Classification: ${project.name}\n` +
+        `**Slug:** \`${project.slug}\`\n` +
+        `**Type:** ${classification.project_type} | **Revenue:** ${classification.revenue_model} | **Deliverable:** ${classification.deliverable_type}\n` +
+        `**Risk:** ${classification.risk_level || "?"} | **Est Hours:** ${classification.estimated_hours || "?"}\n\n` +
+        `**Reasoning:** ${classification.reasoning || "N/A"}\n\n` +
+        `**Active Modules (${expandedModules.length}):**\n${moduleList}\n\n` +
+        `---\n:white_check_mark: Approve: \`approve_classification\` with slug \`${project.slug}\`\n` +
+        `:pencil: Override: \`approve_classification\` with \`override_modules\` param`
+      );
+
+      await mmPipelineUpdate(project.name, `Overwatch classification complete: ${classification.project_type} (${expandedModules.length} modules)`, "telescope");
+
+      await pgQuery(
+        `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
+        [project.id, "overwatch_classified", JSON.stringify(classification)]
+      );
+
+      return {
+        slug: project.slug,
+        classification,
+        active_modules: expandedModules,
+        message: "Classification complete. Awaiting approval via approve_classification.",
+      };
+    },
+  },
+
+  approve_classification: {
+    description: "Approve Overwatch classification and start the modular pipeline. Optionally override modules, type, or revenue model.",
+    params: {
+      slug: "Project slug",
+      override_modules: "(optional) Comma-separated module IDs to replace the classified modules",
+      override_type: "(optional) Override project_type: personal-tool|client-work|market-product|automation|hybrid",
+      override_revenue: "(optional) Override revenue_model: none|subscription|one-time|client-billing|freemium",
+    },
+    handler: async (p) => {
+      const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+      const project = proj.rows[0];
+
+      if (!project.overwatch_classification) {
+        throw new Error(`Project has no classification. Run classify_project first.`);
+      }
+      if (project.overwatch_approved) {
+        throw new Error(`Classification already approved.`);
+      }
+
+      // Apply overrides
+      let activeModules: string[] = project.active_modules || [];
+      if (p.override_modules) {
+        const overrideList = p.override_modules.split(",").map((m: string) => m.trim()).filter(Boolean);
+        // Validate all modules exist
+        for (const m of overrideList) {
+          if (!MODULE_REGISTRY[m]) throw new Error(`Unknown module: ${m}. Available: ${Object.keys(MODULE_REGISTRY).join(", ")}`);
+        }
+        activeModules = applyCoercionRules(overrideList);
+
+        // Create module_runs and research rows for any new modules
+        for (const modId of activeModules) {
+          const def = MODULE_REGISTRY[modId];
+          if (!def) continue;
+          await pgQuery(
+            `INSERT INTO pipeline_module_runs (project_id, module_id, status)
+             VALUES ($1, $2, 'pending')
+             ON CONFLICT (project_id, module_id) DO NOTHING`,
+            [project.id, modId]
+          );
+          for (const section of def.sections) {
+            await pgQuery(
+              `INSERT INTO pipeline_research (project_id, section)
+               VALUES ($1, $2)
+               ON CONFLICT (project_id, section) DO NOTHING`,
+              [project.id, section]
+            );
+          }
+        }
+      }
+
+      const projectType = p.override_type || project.project_type;
+      const revenueModel = p.override_revenue || project.revenue_model;
+
+      // Initialize module_progress
+      const moduleProgress: Record<string, string> = {};
+      for (const m of activeModules) {
+        moduleProgress[m] = "pending";
+      }
+
+      // Set approved + update fields
+      await pgQuery(
+        `UPDATE pipeline_projects SET
+          overwatch_approved = TRUE,
+          active_modules = $1,
+          module_progress = $2,
+          project_type = $3,
+          revenue_model = $4,
+          stage = 'research',
+          research_started_at = NOW(),
+          updated_at = NOW()
+         WHERE id = $5`,
+        [JSON.stringify(activeModules), JSON.stringify(moduleProgress), projectType, revenueModel, project.id]
+      );
+
+      await pgQuery(
+        `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
+        [project.id, "overwatch_approved", JSON.stringify({ active_modules: activeModules, overrides: { modules: !!p.override_modules, type: !!p.override_type, revenue: !!p.override_revenue } })]
+      );
+
+      // Find and start ready modules
+      const readyModules = getReadyModules(activeModules, moduleProgress);
+      const started: string[] = [];
+
+      for (const modId of readyModules) {
+        const def = MODULE_REGISTRY[modId];
+        if (def?.hitlGate) {
+          log("info", "overwatch", "approve", `Module ${modId} gated for HitL`);
+          continue;
+        }
+        startModuleAsync(
+          { id: project.id, slug: project.slug, name: project.name, description: project.description },
+          modId
+        );
+        started.push(modId);
+      }
+
+      await mmPipelineUpdate(project.name, `Classification approved. Starting ${started.length} modules: ${started.join(", ")}`, "rocket");
+
+      return {
+        slug: project.slug,
+        approved: true,
+        active_modules: activeModules,
+        started_modules: started,
+        message: `Approved. ${started.length} modules starting: ${started.join(", ")}`,
+      };
+    },
+  },
+
+  get_module_status: {
+    description: "Get module pipeline status for a project. Shows all active modules, their progress, dependencies, and which modules are ready to start.",
+    params: { slug: "Project slug" },
+    handler: async (p) => {
+      const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+      const project = proj.rows[0];
+
+      if (!project.overwatch_classification) {
+        return { slug: p.slug, message: "Project not classified. Use classify_project first.", legacy_mode: true, stage: project.stage };
+      }
+
+      const moduleRuns = await pgQuery(
+        `SELECT * FROM pipeline_module_runs WHERE project_id = $1 ORDER BY module_id`,
+        [project.id]
+      );
+
+      const activeModules: string[] = project.active_modules || [];
+      const moduleProgress: Record<string, string> = project.module_progress || {};
+      const readyModules = getReadyModules(activeModules, moduleProgress);
+
+      const modules = moduleRuns.rows.map((r: any) => {
+        const def = MODULE_REGISTRY[r.module_id];
+        return {
+          module_id: r.module_id,
+          display_name: def?.displayName || r.module_id,
+          category: def?.category,
+          status: r.status,
+          sections: def?.sections.length || 0,
+          started_at: r.started_at,
+          completed_at: r.completed_at,
+          error: r.error,
+          depends_on: def?.dependsOn.filter(d => activeModules.includes(d)) || [],
+          soft_depends_on: (def?.softDependsOn || []).filter(d => activeModules.includes(d)),
+          is_ready: readyModules.includes(r.module_id),
+          has_hitl_gate: def?.hitlGate || false,
+        };
+      });
+
+      // Get section-level progress for in_progress modules
+      const inProgressModules = modules.filter((m: any) => m.status === "in_progress").map((m: any) => m.module_id as string);
+      let sectionProgress: any[] = [];
+      if (inProgressModules.length > 0) {
+        const allSections = inProgressModules.flatMap((modId: string) => MODULE_REGISTRY[modId]?.sections || []);
+        if (allSections.length > 0) {
+          const sectionRows = await pgQuery(
+            `SELECT section, status FROM pipeline_research WHERE project_id = $1 AND section = ANY($2)`,
+            [project.id, allSections]
+          );
+          sectionProgress = sectionRows.rows;
+        }
+      }
+
+      return {
+        slug: p.slug,
+        project_type: project.project_type,
+        revenue_model: project.revenue_model,
+        deliverable_type: project.deliverable_type,
+        overwatch_approved: project.overwatch_approved,
+        stage: project.stage,
+        modules,
+        ready_to_start: readyModules,
+        section_progress: sectionProgress,
+      };
+    },
+  },
+
+  start_module: {
+    description: "Manually start a specific module for a classified project. Use for HitL-gated modules or re-invocable modules like agent-pipeline.",
+    params: {
+      slug: "Project slug",
+      module_id: "Module to start (e.g. 'war-room', 'agent-pipeline', 'product-launch')",
+    },
+    handler: async (p) => {
+      const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
+      if (proj.rowCount === 0) throw new Error(`Project '${p.slug}' not found`);
+      const project = proj.rows[0];
+
+      if (!project.overwatch_approved) {
+        throw new Error("Project not classified/approved. Run classify_project and approve_classification first.");
+      }
+
+      const moduleId = p.module_id;
+      const def = MODULE_REGISTRY[moduleId];
+      if (!def) throw new Error(`Unknown module: ${moduleId}. Available: ${Object.keys(MODULE_REGISTRY).join(", ")}`);
+
+      const activeModules: string[] = project.active_modules || [];
+      const moduleProgress: Record<string, string> = project.module_progress || {};
+
+      // For re-invocable modules, allow restart even if complete
+      if (def.reInvocable && moduleProgress[moduleId] === "complete") {
+        await pgQuery(
+          `UPDATE pipeline_module_runs SET status = 'pending', started_at = NULL, completed_at = NULL, updated_at = NOW()
+           WHERE project_id = $1 AND module_id = $2`,
+          [project.id, moduleId]
+        );
+        moduleProgress[moduleId] = "pending";
+        await pgQuery(
+          `UPDATE pipeline_projects SET module_progress = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(moduleProgress), project.id]
+        );
+      }
+
+      // If not in active modules, add it
+      if (!activeModules.includes(moduleId)) {
+        activeModules.push(moduleId);
+        await pgQuery(
+          `UPDATE pipeline_projects SET active_modules = $1, updated_at = NOW() WHERE id = $2`,
+          [JSON.stringify(activeModules), project.id]
+        );
+        // Ensure module_run row exists
+        await pgQuery(
+          `INSERT INTO pipeline_module_runs (project_id, module_id, status)
+           VALUES ($1, $2, 'pending')
+           ON CONFLICT (project_id, module_id) DO NOTHING`,
+          [project.id, moduleId]
+        );
+        // Ensure research rows
+        for (const section of def.sections) {
+          await pgQuery(
+            `INSERT INTO pipeline_research (project_id, section)
+             VALUES ($1, $2)
+             ON CONFLICT (project_id, section) DO NOTHING`,
+            [project.id, section]
+          );
+        }
+      }
+
+      // Check deps
+      const hardDepsOk = def.dependsOn.every(dep =>
+        !activeModules.includes(dep) || moduleProgress[dep] === "complete"
+      );
+      if (!hardDepsOk) {
+        const blockers = def.dependsOn.filter(dep => activeModules.includes(dep) && moduleProgress[dep] !== "complete");
+        throw new Error(`Cannot start ${moduleId}: blocked by ${blockers.join(", ")}`);
+      }
+
+      const softDepsOk = (def.softDependsOn || []).every(dep =>
+        !activeModules.includes(dep) || moduleProgress[dep] === "complete"
+      );
+      if (!softDepsOk) {
+        const waitingOn = (def.softDependsOn || []).filter(dep => activeModules.includes(dep) && moduleProgress[dep] !== "complete");
+        log("warn", "module", "start", `Starting ${moduleId} with incomplete soft deps: ${waitingOn.join(", ")}`);
+      }
+
+      // Start module
+      startModuleAsync(
+        { id: project.id, slug: project.slug, name: project.name, description: project.description },
+        moduleId
+      );
+
+      return {
+        slug: project.slug,
+        module_id: moduleId,
+        status: "starting",
+        message: `Module ${def.displayName} starting in background.`,
+      };
+    },
+  },
 };
 
 // --- Registration ---
@@ -1564,10 +2713,12 @@ export function registerProjectTools(server: McpServer) {
   server.tool(
     "project_list",
     "List all available Project Pipeline tools. Manages the full dev-team automation lifecycle: idea capture, " +
-    "research (13 sections), architecture, security review, planning, building, and completion. Tools cover: " +
-    "project CRUD (create/list/get/update/advance/archive), research (start/get/update/complete), " +
+    "Overwatch classification (classify/approve/route), modular research pipelines, architecture, security review, " +
+    "planning, building, and completion. Tools cover: " +
+    "project CRUD (create/list/get/update/advance/archive), Overwatch (classify_project/approve_classification/get_module_status/start_module), " +
+    "research (start/get/update/complete), " +
     "agent tasks (create/list/update/run_devteam_workflow), human-in-the-loop reviews (submit_for_review/check_review/list_pending_reviews), async questions (add/answer/get_unanswered/get), " +
-    "sprints (add/update/start/complete), artifacts (add/list), and tracking (log_event/get_metrics/get_timeline).",
+    "sprints (add/update/start/complete/populate_from_sow/run), artifacts (add/list), and tracking (log_event/get_metrics/get_timeline).",
     {},
     async () => {
       const toolList = Object.entries(tools).map(([name, def]) => ({

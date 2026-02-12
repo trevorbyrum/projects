@@ -92,7 +92,7 @@ function setCorsHeaders(res: express.Response) {
   res.setHeader("Access-Control-Max-Age", "86400");
 }
 
-// -- Mattermost Slash Command Webhook ------------------------------------------
+// ── Mattermost Slash Command Webhook ──────────────────────────
 app.post("/webhook/mattermost", async (req, res) => {
   try {
     // Mattermost sends slash command data as form-urlencoded
@@ -121,9 +121,9 @@ app.post("/webhook/mattermost", async (req, res) => {
   }
 });
 
-// -- Health Check --------------------------------------------------------------
+// ── Health Check ─────────────────────────────────────────────
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", sessions: sessions.size, uptime: process.uptime() });
+  res.json({ status: "ok", service: "homelab-mcp-gateway", version: "1.0.0", sessions: sessions.size, uptime: process.uptime(), timestamp: new Date().toISOString() });
 });
 
 app.all("/", async (req, res) => {
@@ -207,10 +207,6 @@ app.all("/", async (req, res) => {
       res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal error" }, id: null });
     }
   }
-});
-
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", service: "homelab-mcp-gateway", version: "1.0.0", timestamp: new Date().toISOString(), activeSessions: sessions.size });
 });
 
 app.all("/.well-known/*", (req, res) => {

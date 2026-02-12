@@ -14,6 +14,8 @@ export const MM_CHANNELS = {
   "alerts": "your-channel-id-alerts",
   "dev-logs": "your-channel-id-dev-logs",
   "deliverables": "your-channel-id-deliverables",
+  "to-do": "your-channel-id-to-do",
+  "queue": "your-channel-id-queue",
 } as const;
 
 export type MMChannel = keyof typeof MM_CHANNELS;
@@ -204,4 +206,40 @@ export async function mmCreateChannel(
     throw new Error(`Failed to create channel '${name}': ${res.status} ${body}`);
   }
   return await res.json();
+}
+
+/**
+ * Post a to-do item. Context should be brief (a few words).
+ * Priority: blocking (red), action-needed (orange), info (blue)
+ */
+export async function mmTodo(
+  item: string,
+  context?: string,
+  priority?: "blocking" | "action-needed" | "info"
+): Promise<void> {
+  const icon = priority === "blocking" ? ":red_circle:"
+    : priority === "action-needed" ? ":large_orange_circle:"
+    : ":large_blue_circle:";
+  const ctxStr = context ? ` — *${context}*` : "";
+  await mmPost("to-do", `${icon} ${item}${ctxStr}`);
+}
+
+/**
+ * Post a queue update. Shows project queue state changes.
+ */
+export async function mmQueueUpdate(
+  project: string,
+  action: "added" | "stage-changed" | "completed" | "archived" | "removed",
+  details?: string
+): Promise<void> {
+  const icons: Record<string, string> = {
+    "added": ":new:",
+    "stage-changed": ":arrow_right:",
+    "completed": ":white_check_mark:",
+    "archived": ":file_cabinet:",
+    "removed": ":wastebasket:",
+  };
+  const icon = icons[action] || ":pushpin:";
+  const detailStr = details ? ` — ${details}` : "";
+  await mmPost("queue", `${icon} **${project}** ${action}${detailStr}`);
 }
