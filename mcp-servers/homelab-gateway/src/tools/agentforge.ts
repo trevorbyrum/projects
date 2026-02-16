@@ -1,20 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import pg from "pg";
 import neo4j, { Driver, Session } from "neo4j-driver";
-import { mmPost } from "./mm-notify.js";
+import { mmPost, mmNotify } from "./mm-notify.js";
+import { pgQuery } from "../utils/postgres.js";
+import { openrouterChat as llmCall } from "../utils/llm.js";
 
-const { Pool } = pg;
 
 // --- Config (reuses existing env vars) ---
 
-const POSTGRES_HOST = process.env.POSTGRES_HOST || "pgvector-18";
-const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || "5432");
-const POSTGRES_USER = process.env.POSTGRES_USER || "";
-const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || "";
-const POSTGRES_DB = process.env.POSTGRES_DB || "";
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || "";
-const OPENROUTER_URL = "https://openrouter.ai/api/v1";
+
 const NEO4J_URL = process.env.NEO4J_URL || "bolt://Neo4j:7687";
 const NEO4J_USER = process.env.NEO4J_USER || "neo4j";
 const NEO4J_PASSWORD = process.env.NEO4J_PASSWORD || "";
@@ -38,31 +32,9 @@ function log(level: "info" | "warn" | "error", op: string, msg: string, meta?: R
   else console.log(`${prefix} ${msg}${metaStr}`);
 }
 
-async function ntfyNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
-  const emoji = tags?.length ? `:${tags[0]}: ` : "";
-  const titleStr = title ? `**${emoji}${title}**\n` : "";
-  await mmPost("dev-logs", `${titleStr}${message}`);
-}
 
-// --- PostgreSQL ---
 
-let pool: pg.Pool | null = null;
 
-function getPool(): pg.Pool {
-  if (!pool) {
-    if (!POSTGRES_USER || !POSTGRES_PASSWORD || !POSTGRES_DB) {
-      throw new Error("PostgreSQL not configured");
-    }
-    pool = new Pool({ host: POSTGRES_HOST, port: POSTGRES_PORT, user: POSTGRES_USER, password: POSTGRES_PASSWORD, database: POSTGRES_DB });
-  }
-  return pool;
-}
-
-async function pgQuery(sql: string, params: any[] = []): Promise<any> {
-  const client = await getPool().connect();
-  try { return await client.query(sql, params); }
-  finally { client.release(); }
-}
 
 // --- Neo4j ---
 
@@ -94,25 +66,7 @@ async function runCypher(cypher: string, params: Record<string, any> = {}): Prom
 
 // --- OpenRouter LLM ---
 
-async function llmCall(model: string, messages: Array<{ role: string; content: string }>, maxTokens = 4000): Promise<string> {
-  if (!OPENROUTER_API_KEY) throw new Error("OPENROUTER_API_KEY not set");
-  const res = await fetch(`${OPENROUTER_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://mcp.homelab.local",
-      "X-Title": "AgentForge",
-    },
-    body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.3 }),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`OpenRouter error (${res.status}): ${err}`);
-  }
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || "";
-}
+
 
 // --- HuggingFace API ---
 
@@ -1202,7 +1156,7 @@ Output ONLY the JSON object.`;
         [JSON.stringify({ deployment: { app_id: appId, dataset_id: datasetId, deployed_at: new Date().toISOString() } }), p.experiment_id]
       );
 
-      await ntfyNotify(
+      await mmNotify(
         `AgentForge deployed: ${appConfig.name} (app: ${appId})`,
         "Agent Deployed",
         3,
@@ -1333,7 +1287,7 @@ Output ONLY the JSON array.`;
         "⏳ Awaiting approval...",
       ].join("\n");
 
-      await ntfyNotify(notification, "Resource Evaluation", 4, ["clipboard"]);
+      await mmNotify(notification, "Resource Evaluation", 4, ["clipboard"]);
 
       log("info", "evaluate_resources", `Evaluation complete for ${project.name}`, {
         reusable: reusablePrompts.length,
@@ -1374,7 +1328,7 @@ Output ONLY the JSON array.`;
       );
       if (result.rowCount === 0) throw new Error(`Evaluation ${p.evaluation_id} not found`);
 
-      await ntfyNotify(
+      await mmNotify(
         `Resource evaluation ${status}: ${p.notes || "no notes"}`,
         "Evaluation Decision",
         3,
@@ -1432,7 +1386,7 @@ Output ONLY the JSON array.`;
 
       const stageResults: Record<string, any> = {};
 
-      await ntfyNotify(`AgentForge pipeline started: ${exp.rows[0].name}`, "Pipeline Started", 3, ["gear"]);
+      await mmNotify(`AgentForge pipeline started: ${exp.rows[0].name}`, "Pipeline Started", 3, ["gear"]);
 
       try {
         // Stage 1: Discovery (datasets only — models available via discover_models for manual use)
@@ -1492,7 +1446,7 @@ Output ONLY the JSON array.`;
           [JSON.stringify({ pipeline_results: stageResults }), p.experiment_id]
         );
 
-        await ntfyNotify(
+        await mmNotify(
           `AgentForge pipeline complete: ${exp.rows[0].name}\n${JSON.stringify(stageResults, null, 2)}`,
           "Pipeline Complete",
           4,
@@ -1507,7 +1461,7 @@ Output ONLY the JSON array.`;
           [JSON.stringify({ error: err.message, completed_stages: stageResults }), p.experiment_id]
         );
 
-        await ntfyNotify(
+        await mmNotify(
           `AgentForge pipeline FAILED: ${exp.rows[0].name}\nError: ${err.message}`,
           "Pipeline Failed",
           5,

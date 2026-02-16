@@ -33,7 +33,7 @@ See any existing file in src/tools/ for the pattern.
     --restart unless-stopped
     --env-file /opt/homelab-mcp-gateway/.env
     -l traefik.enable=true
-    -l traefik.http.routers.mcp-gateway.rule=Host(mcp.your-domain.com)
+    -l traefik.http.routers.mcp-gateway.rule=Host(your-domain.com)
     -l traefik.http.services.mcp-gateway.loadbalancer.server.port=3500
     homelab-mcp-gateway
 
@@ -50,7 +50,7 @@ The 3 labels above are all that are needed.
 | Qdrant | Qdrant | http://Qdrant:6333 |
 | Neo4j | Neo4j | bolt://Neo4j:7687 |
 | PostgreSQL | pgvector-18 | postgresql://pgvector-18:5432 |
-| n8n | (public) | https://n8n.your-domain.com |
+| n8n | (public) | https://your-domain.com |
 | Vault | Vault | http://Vault:8200 |
 | Docker | docker-socket-proxy | http://docker-socket-proxy:2375 |
 | Dify API | dify-api | http://dify-api:5001 |
@@ -59,6 +59,3 @@ The 3 labels above are all that are needed.
 | Traefik | traefik | http://traefik:8080 (API) |
 | Redis | Redis | redis://Redis:6379 |
 | MongoDB | MongoDB | mongodb://MongoDB:27017 |
-| GitLab CE | gitlab-ce | http://gitlab-ce:80 |
-| Figma | (external API) | https://api.figma.com |
-| ntfy | ntfy | http://ntfy:80 |

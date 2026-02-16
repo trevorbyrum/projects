@@ -1,29 +1,30 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import pg from "pg";
 import { searchPreferences } from "./preferences.js";
+import { pgQuery } from "../utils/postgres.js";
 import { gitlabFetch, createWorkspaceDirect, createCodingSessionDirect, mergeSprintDirect, promoteCodeToProjectRepo, getConversationStatus } from "./workspaces.js";
 import { startAndRunWarRoom } from "./war-room.js";
-import { mmAlert, mmPipelineUpdate, mmDeliverable, mmPostWithId, mmUpdatePost, mmPost, mmTodo, mmQueueUpdate } from "./mm-notify.js";
+import { mmAlert, mmPipelineUpdate, mmDeliverable, mmDeliverablePdf, mmPostWithId, mmUpdatePost, mmPost, mmTodo, mmQueueUpdate, mmNotify, mmError, mmWarn } from "./mm-notify.js";
+import { renderSowPdf } from "./pdf-renderer.js";
+import {
+  writeResearchDoc, readResearchDoc, getRepoForModule,
+  generateModuleSummary, generateProjectSummary,
+  findingsToMarkdown,
+} from "../utils/research-docs.js";
+import { trackDify, flushLangfuse } from "../utils/langfuse.js";
+import { openrouterChat } from "../utils/llm.js";
 
-const { Pool } = pg;
 
-const POSTGRES_HOST = process.env.POSTGRES_HOST || "pgvector-18";
-const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || "5432");
-const POSTGRES_USER = process.env.POSTGRES_USER || "";
-const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || "";
-const POSTGRES_DB = process.env.POSTGRES_DB || "";
+
 const N8N_WEBHOOK_BASE = process.env.N8N_WEBHOOK_BASE || "http://n8n:5678/webhook";
 
 // n8n 2.4.6 webhook URLs include workflowId prefix: /webhook/{workflowId}/webhook/{path}
 const N8N_WEBHOOK_IDS: Record<string, string> = {
-  "project-gitlab-sync": "your-webhook-id",
-  "project-research-pipeline": "your-webhook-id",
-  "project-research-resume": "your-webhook-id",
-  "dev-team-orchestrator": "",  // path-only webhook format (API-created)
+  "project-gitlab-sync": process.env.N8N_WH_GITLAB_SYNC || "",
+  "project-research-pipeline": process.env.N8N_WH_RESEARCH_PIPELINE || "",
+  "project-research-resume": process.env.N8N_WH_RESEARCH_RESUME || "",
+  "dev-team-orchestrator": process.env.N8N_WH_DEVTEAM_ORCHESTRATOR || "",
 };
-
-let pool: pg.Pool | null = null;
 
 // ── Async Workflow Job Store ────────────────────────────────
 interface AsyncJob {
@@ -39,33 +40,6 @@ interface AsyncJob {
 }
 const asyncJobs = new Map<string, AsyncJob>();
 let jobCounter = 0;
-
-function getPool(): pg.Pool {
-  if (!pool) {
-    if (!POSTGRES_USER || !POSTGRES_PASSWORD || !POSTGRES_DB) {
-      throw new Error("PostgreSQL not configured - check POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB");
-    }
-    pool = new Pool({
-      host: POSTGRES_HOST,
-      port: POSTGRES_PORT,
-      user: POSTGRES_USER,
-      password: POSTGRES_PASSWORD,
-      database: POSTGRES_DB,
-    });
-  }
-  return pool;
-}
-
-async function pgQuery(sql: string, params: any[] = []): Promise<any> {
-  const client = await getPool().connect();
-  try {
-    return await client.query(sql, params);
-  } finally {
-    client.release();
-  }
-}
-
-
 
 async function triggerN8n(webhookPath: string, data: Record<string, any>): Promise<any> {
   const startTime = Date.now();
@@ -83,7 +57,7 @@ async function triggerN8n(webhookPath: string, data: Record<string, any>): Promi
 
     if (!res.ok) {
       const body = await res.text().catch(() => "(no body)");
-      await ntfyError("n8n", webhookPath, `Webhook returned HTTP ${res.status}`, {
+      await mmError("n8n", webhookPath, `Webhook returned HTTP ${res.status}`, {
         webhook: webhookPath, status: res.status, body: body.slice(0, 500), elapsed_ms: elapsed,
       });
       return null;
@@ -94,7 +68,7 @@ async function triggerN8n(webhookPath: string, data: Record<string, any>): Promi
     try { return JSON.parse(text); } catch { return text; }
   } catch (e: any) {
     const elapsed = Date.now() - startTime;
-    await ntfyError("n8n", webhookPath, `Webhook call failed: ${e.message}`, {
+    await mmError("n8n", webhookPath, `Webhook call failed: ${e.message}`, {
       webhook: webhookPath, error: e.message, elapsed_ms: elapsed,
     });
     return null;
@@ -112,10 +86,11 @@ const VALID_STAGES = ["queue", "research", "architecture", "security_review", "p
 const STAGE_ORDER = ["queue", "research", "architecture", "security_review", "planning", "active", "completed"];
 // Section order: ui-ux-research moved early (position 3) so design decisions inform downstream sections
 const RESEARCH_SECTIONS = [
-  "libraries", "security", "ui-ux-research",
-  "architecture", "dependencies", "file-structure",
-  "tools", "containers", "integration", "costs",
-  "open-source-scan", "best-practices", "prior-art",
+  "prior-art", "libraries", "architecture",
+  "dependencies", "file-structure", "tools",
+  "containers", "integration", "security",
+  "costs", "open-source-scan", "ui-ux-research",
+  "best-practices",
 ];
 
 // Maps each research section to a preference search query for relevant design/dev preferences
@@ -135,6 +110,59 @@ const SECTION_PREF_QUERIES: Record<string, string> = {
   "prior-art":        "prior art similar projects inspiration",
 };
 
+// Explicit dependency graph: section → sections it depends on
+const SECTION_DEPENDENCIES: Record<string, string[]> = {
+  "prior-art":        [],
+  "libraries":        ["prior-art"],
+  "security":         ["prior-art"],
+  "ui-ux-research":   ["prior-art"],
+  "architecture":     ["libraries", "security"],
+  "dependencies":     ["libraries"],
+  "file-structure":   ["architecture"],
+  "tools":            ["architecture", "dependencies"],
+  "containers":       ["architecture"],
+  "integration":      ["architecture", "containers"],
+  "costs":            ["containers", "tools"],
+  "open-source-scan": ["libraries", "dependencies"],
+  "best-practices":   ["architecture", "security", "tools"],
+};
+
+/** Kahn's algorithm: returns sections grouped into parallel tiers */
+function kahnTieredSort(sections: string[], deps: Record<string, string[]>): string[][] {
+  const inDegree: Record<string, number> = {};
+  const dependents: Record<string, string[]> = {};
+  const processed = new Set<string>();
+  for (const s of sections) {
+    inDegree[s] = 0;
+    dependents[s] = [];
+  }
+  for (const s of sections) {
+    for (const dep of (deps[s] || [])) {
+      if (sections.includes(dep)) {
+        inDegree[s]++;
+        dependents[dep].push(s);
+      }
+    }
+  }
+  const tiers: string[][] = [];
+  while (processed.size < sections.length) {
+    const tier = sections.filter(s => !processed.has(s) && inDegree[s] === 0);
+    if (tier.length === 0) {
+      // Cycle detected — dump remaining into final tier
+      tiers.push(sections.filter(s => !processed.has(s)));
+      break;
+    }
+    tiers.push(tier);
+    for (const s of tier) {
+      processed.add(s);
+      for (const dep of dependents[s]) {
+        if (inDegree[dep] > 0) inDegree[dep]--;
+      }
+    }
+  }
+  return tiers;
+}
+
 // ── Structured Logging ──────────────────────────────────────
 
 function log(level: "info" | "warn" | "error", module: string, op: string, msg: string, meta?: Record<string, any>) {
@@ -150,53 +178,228 @@ function log(level: "info" | "warn" | "error", module: string, op: string, msg: 
   }
 }
 
-async function ntfyNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
-  const emoji = tags?.length ? `:${tags[0]}: ` : "";
-  const titleStr = title ? `**${emoji}${title}**\n` : "";
-  await mmPost("dev-logs", `${titleStr}${message}`);
-}
 
-async function ntfyError(module: string, op: string, error: string, meta?: Record<string, any>) {
-  log("error", module, op, error, meta);
-  await mmAlert(module, op, error, meta);
-}
-
-async function ntfyWarn(module: string, op: string, message: string, meta?: Record<string, any>) {
-  log("warn", module, op, message, meta);
-  const metaStr = meta ? "\n```json\n" + JSON.stringify(meta, null, 2) + "\n```" : "";
-  await mmPost("alerts", `#### :warning: Warning in \`${module}.${op}\`\n${message}${metaStr}`);
-}
 
 
 // Dify workflow API keys per research section
 const DIFY_SECTION_KEYS: Record<string, string> = {
-  "libraries":         "your-dify-key",
-  "architecture":      "your-dify-key",
-  "security":          "your-dify-key",
-  "dependencies":      "your-dify-key",
-  "file-structure":    "your-dify-key",
-  "tools":             "your-dify-key",
-  "containers":        "your-dify-key",
-  "integration":       "your-dify-key",
-  "costs":             "your-dify-key",
-  "open-source-scan":  "your-dify-key",
-  "best-practices":    "your-dify-key",
-  "ui-ux-research":    "your-dify-key",
-  "prior-art":         "your-dify-key",
+  "libraries":         process.env.DIFY_KEY_LIBRARIES || "",
+  "architecture":      process.env.DIFY_KEY_ARCHITECTURE || "",
+  "security":          process.env.DIFY_KEY_SECURITY || "",
+  "dependencies":      process.env.DIFY_KEY_DEPENDENCIES || "",
+  "file-structure":    process.env.DIFY_KEY_FILE_STRUCTURE || "",
+  "tools":             process.env.DIFY_KEY_TOOLS || "",
+  "containers":        process.env.DIFY_KEY_CONTAINERS || "",
+  "integration":       process.env.DIFY_KEY_INTEGRATION || "",
+  "costs":             process.env.DIFY_KEY_COSTS || "",
+  "open-source-scan":  process.env.DIFY_KEY_OPEN_SOURCE_SCAN || "",
+  "best-practices":    process.env.DIFY_KEY_BEST_PRACTICES || "",
+  "ui-ux-research":    process.env.DIFY_KEY_UI_UX_RESEARCH || "",
+  "prior-art":         process.env.DIFY_KEY_PRIOR_ART || "",
 };
 
 // Dev-team Dify workflow API keys
 const DIFY_DEVTEAM_KEYS: Record<string, string> = {
-  "architect-design":        "your-dify-key",
-  "architect-revise":        "your-dify-key",
-  "security-review":         "your-dify-key",
-  "pm-generate-sow":         "your-dify-key",
-  "pm-generate-task-prompts":"your-dify-key",
-  "code-reviewer":           "your-dify-key",
-  "focused-research":        "your-dify-key",
+  "architect-design":        process.env.DIFY_KEY_ARCHITECT_DESIGN || "",
+  "architect-revise":        process.env.DIFY_KEY_ARCHITECT_REVISE || "",
+  "security-review":         process.env.DIFY_KEY_SECURITY_REVIEW || "",
+  "pm-generate-sow":         process.env.DIFY_KEY_PM_GENERATE_SOW || "",
+  "pm-generate-task-prompts":process.env.DIFY_KEY_PM_GENERATE_TASKS || "",
+  "code-reviewer":           process.env.DIFY_KEY_CODE_REVIEWER || "",
+  "focused-research":        process.env.DIFY_KEY_FOCUSED_RESEARCH || "",
 };
 
 const DIFY_API_BASE = process.env.DIFY_API_BASE || "http://dify-api:5001";
+
+// ── Overwatch Module Key Maps ─────────────────────────────────────────────────
+
+// Overwatch classification workflow key
+const DIFY_OVERWATCH_KEY = process.env.DIFY_OVERWATCH_CLASSIFY_KEY || "";
+
+// Market Viability section keys
+const DIFY_MARKET_KEYS: Record<string, string> = {
+  "tam-sam-som":           process.env.DIFY_MARKET_TAM_KEY || "",
+  "competitor-landscape":  process.env.DIFY_MARKET_COMPETITORS_KEY || "",
+  "differentiation":       process.env.DIFY_MARKET_DIFFERENTIATION_KEY || "",
+  "demand-validation":     process.env.DIFY_MARKET_DEMAND_KEY || "",
+  "pricing-strategy":      process.env.DIFY_MARKET_PRICING_KEY || "",
+  "market-timing":         process.env.DIFY_MARKET_TIMING_KEY || "",
+};
+
+// Marketing Strategy section keys
+const DIFY_STRATEGY_KEYS: Record<string, string> = {
+  "go-to-market":        process.env.DIFY_STRATEGY_GTM_KEY || "",
+  "channel-selection":   process.env.DIFY_STRATEGY_CHANNELS_KEY || "",
+  "content-strategy":    process.env.DIFY_STRATEGY_CONTENT_KEY || "",
+  "social-media":        process.env.DIFY_STRATEGY_SOCIAL_KEY || "",
+  "campaign-design":     process.env.DIFY_STRATEGY_CAMPAIGNS_KEY || "",
+  "brand-positioning":   process.env.DIFY_STRATEGY_BRAND_KEY || "",
+};
+
+// Report Compiler key
+const DIFY_REPORT_KEY = process.env.DIFY_MARKET_STRATEGY_REPORT_KEY || "";
+
+// Automation Design section keys
+const DIFY_AUTO_KEYS: Record<string, string> = {
+  "workflow-design":      process.env.DIFY_AUTO_WORKFLOW_KEY || "",
+  "tool-selection":       process.env.DIFY_AUTO_TOOLS_KEY || "",
+  "integration-mapping":  process.env.DIFY_AUTO_INTEGRATION_KEY || "",
+  "trigger-action-arch":  process.env.DIFY_AUTO_TRIGGERS_KEY || "",
+  "guardrail-design":     process.env.DIFY_AUTO_GUARDRAILS_KEY || "",
+};
+
+// Agent Pipeline section keys
+const DIFY_AGENT_KEYS: Record<string, string> = {
+  "agent-discovery":      process.env.DIFY_AGENT_DISCOVERY_KEY || "",
+  "prompt-audit":         process.env.DIFY_AGENT_PROMPT_AUDIT_KEY || "",
+  "lightrag-assessment":  process.env.DIFY_AGENT_LIGHTRAG_KEY || "",
+  "agent-scaffolding":    process.env.DIFY_AGENT_SCAFFOLDING_KEY || "",
+};
+
+// Product Launch section keys
+const DIFY_LAUNCH_KEYS: Record<string, string> = {
+  "marketplace-setup":  process.env.DIFY_LAUNCH_MARKETPLACE_KEY || "",
+  "landing-page":       process.env.DIFY_LAUNCH_LANDING_KEY || "",
+  "pricing-config":     process.env.DIFY_LAUNCH_PRICING_KEY || "",
+  "distribution":       process.env.DIFY_LAUNCH_DISTRIBUTION_KEY || "",
+};
+
+// Module definition type
+interface ModuleDefinition {
+  id: string;
+  name: string;
+  sections: string[];
+  difyKeys: Record<string, string> | null;
+  dependsOn: string[];
+  softDependsOn: string[];
+  hitlGate: boolean;
+  reInvocable: boolean;
+  coercionRules?: { requiredTypes: string[]; excludedTypes?: string[] };
+}
+
+// MODULE_REGISTRY — defines all Overwatch pipeline modules
+const MODULE_REGISTRY: Record<string, ModuleDefinition> = {
+  "tech-research": {
+    id: "tech-research",
+    name: "Technical Research",
+    sections: [
+      "market-analysis", "competitive-landscape", "technical-stack", "api-integration-research",
+      "data-model", "scalability-strategy", "monetization", "risk-assessment", "user-personas",
+      "open-source-scan", "best-practices", "ui-ux-research", "prior-art",
+    ],
+    difyKeys: null,
+    dependsOn: [],
+    softDependsOn: [],
+    hitlGate: false,
+    reInvocable: false,
+  },
+  "market-viability": {
+    id: "market-viability",
+    name: "Market Viability Analysis",
+    sections: ["tam-sam-som", "competitor-landscape", "differentiation", "demand-validation", "pricing-strategy", "market-timing"],
+    difyKeys: DIFY_MARKET_KEYS,
+    dependsOn: [],
+    softDependsOn: ["tech-research"],
+    hitlGate: false,
+    reInvocable: false,
+    coercionRules: { requiredTypes: ["market-product", "client-work"] },
+  },
+  "marketing-strategy": {
+    id: "marketing-strategy",
+    name: "Marketing Strategy",
+    sections: ["go-to-market", "channel-selection", "content-strategy", "social-media", "campaign-design", "brand-positioning"],
+    difyKeys: DIFY_STRATEGY_KEYS,
+    dependsOn: ["market-viability"],
+    softDependsOn: ["tech-research"],
+    hitlGate: false,
+    reInvocable: false,
+    coercionRules: { requiredTypes: ["market-product"] },
+  },
+  "report-compiler": {
+    id: "report-compiler",
+    name: "Market & Strategy Report",
+    sections: ["market-strategy-compile-report"],
+    difyKeys: { "market-strategy-compile-report": DIFY_REPORT_KEY },
+    dependsOn: ["market-viability", "marketing-strategy"],
+    softDependsOn: [],
+    hitlGate: false,
+    reInvocable: true,
+    coercionRules: { requiredTypes: ["market-product"] },
+  },
+  "automation-design": {
+    id: "automation-design",
+    name: "Automation Design",
+    sections: ["workflow-design", "tool-selection", "integration-mapping", "trigger-action-arch", "guardrail-design"],
+    difyKeys: DIFY_AUTO_KEYS,
+    dependsOn: [],
+    softDependsOn: ["tech-research"],
+    hitlGate: false,
+    reInvocable: false,
+    coercionRules: { requiredTypes: ["automation"] },
+  },
+  "architecture": {
+    id: "architecture",
+    name: "Architecture Design",
+    sections: ["architect-design"],
+    difyKeys: null,
+    dependsOn: ["tech-research"],
+    softDependsOn: [],
+    hitlGate: false,
+    reInvocable: false,
+  },
+  "security-review": {
+    id: "security-review",
+    name: "Security Review",
+    sections: ["security-review"],
+    difyKeys: null,
+    dependsOn: ["architecture"],
+    softDependsOn: [],
+    hitlGate: true,
+    reInvocable: true,
+  },
+  "war-room": {
+    id: "war-room",
+    name: "War Room",
+    sections: ["war-room-session"],
+    difyKeys: null,
+    dependsOn: ["architecture"],
+    softDependsOn: ["security-review"],
+    hitlGate: true,
+    reInvocable: true,
+  },
+  "agent-pipeline": {
+    id: "agent-pipeline",
+    name: "Agent Pipeline",
+    sections: ["agent-discovery", "prompt-audit", "lightrag-assessment", "agent-scaffolding"],
+    difyKeys: DIFY_AGENT_KEYS,
+    dependsOn: ["tech-research"],
+    softDependsOn: ["architecture"],
+    hitlGate: false,
+    reInvocable: false,
+    coercionRules: { requiredTypes: ["automation", "hybrid"] },
+  },
+  "sprint-planning": {
+    id: "sprint-planning",
+    name: "Sprint Planning",
+    sections: ["pm-generate-sow"],
+    difyKeys: null,
+    dependsOn: ["architecture", "security-review"],
+    softDependsOn: ["war-room"],
+    hitlGate: true,
+    reInvocable: true,
+  },
+  "product-launch": {
+    id: "product-launch",
+    name: "Product Launch",
+    sections: ["marketplace-setup", "landing-page", "pricing-config", "distribution"],
+    difyKeys: DIFY_LAUNCH_KEYS,
+    dependsOn: ["sprint-planning"],
+    softDependsOn: ["marketing-strategy"],
+    hitlGate: true,
+    reInvocable: false,
+    coercionRules: { requiredTypes: ["market-product"] },
+  },
+};
 
 async function callDify(apiKey: string, inputs: Record<string, string>, workflowName?: string): Promise<any> {
   const startTime = Date.now();
@@ -221,7 +424,7 @@ async function callDify(apiKey: string, inputs: Record<string, string>, workflow
     if (!res.ok) {
       const body = await res.text();
       const errMsg = `Dify workflow ${label} returned HTTP ${res.status}: ${body.slice(0, 500)}`;
-      await ntfyError("dify", label, errMsg, { status: res.status, elapsed_ms: elapsed });
+      await mmError("dify", label, errMsg, { status: res.status, elapsed_ms: elapsed });
       throw new Error(errMsg);
     }
 
@@ -231,22 +434,93 @@ async function callDify(apiKey: string, inputs: Record<string, string>, workflow
       tokens: result?.data?.total_tokens,
       elapsed_ms: elapsed,
     });
+    trackDify({
+      workflow: label,
+      inputs,
+      output: result?.data?.outputs,
+      tokens: result?.data?.total_tokens,
+      cost: result?.data?.total_price,
+      elapsed_ms: elapsed,
+      status: result?.data?.status,
+    });
     return result;
   } catch (e: any) {
     if (!e.message.includes("Dify workflow")) {
       // Network/fetch error (not our rethrown error)
       const elapsed = Date.now() - startTime;
-      await ntfyError("dify", label, `Workflow call failed: ${e.message}`, { elapsed_ms: elapsed });
+      await mmError("dify", label, `Workflow call failed: ${e.message}`, { elapsed_ms: elapsed });
     }
     throw e;
   }
 }
 
-async function runResearchPipeline(project: { id: number; slug: string; name: string; description: string | null }): Promise<void> {
+type SectionStat = { section: string; status: "success" | "failed" | "error" | "skipped"; elapsed?: string; tokens?: number; error?: string };
+
+function buildResearchReport(projectName: string, stats: SectionStat[], crashError?: string): string {
+  const succeeded = stats.filter(s => s.status === "success").length;
+  const failed = stats.filter(s => s.status !== "success").length;
+  const totalTokens = stats.reduce((sum, s) => sum + (s.tokens || 0), 0);
+  let msg = `**Research ${crashError ? "CRASHED" : "Complete"}** for **${projectName}**\n\n`;
+  msg += "| Section | Result | Time | Tokens |\n";
+  msg += "|:--|:--|--:|--:|\n";
+  for (const s of stats) {
+    const icon = s.status === "success" ? ":white_check_mark:" : ":x:";
+    const label = s.status === "success" ? "OK" : s.error ? s.error.slice(0, 60) : s.status;
+    msg += `| ${s.section} | ${icon} ${label} | ${s.elapsed || "\u2014"} | ${s.tokens?.toLocaleString() || "\u2014"} |\n`;
+  }
+  msg += `\n**${succeeded}/${stats.length}** succeeded`;
+  if (totalTokens > 0) msg += ` | **${totalTokens.toLocaleString()}** tokens`;
+  if (crashError) msg += `\n\n:rotating_light: **Crash:** ${crashError.slice(0, 200)}`;
+  return msg;
+}
+
+export async function runResearchPipeline(project: { id: number; slug: string; name: string; description: string | null }): Promise<void> {
   const serverContext = "Unraid Tower server with Docker, Traefik reverse proxy, PostgreSQL, Neo4j, n8n, Dify";
   let completedCount = 0;
   const totalSections = RESEARCH_SECTIONS.length;
   const accumulatedFindings: Record<string, any> = {};
+  const sectionStats: SectionStat[] = [];
+
+  // Pre-create research rows (for overwatch module flow which bypasses start_research)
+  for (const sec of RESEARCH_SECTIONS) {
+    await pgQuery(
+      `INSERT INTO pipeline_research (project_id, section) VALUES ($1, $2) ON CONFLICT (project_id, section) DO NOTHING`,
+      [project.id, sec],
+    );
+  }
+
+  // Load already-completed sections so we can skip them and seed accumulated findings
+  const existingRes = await pgQuery(
+    `SELECT section, status, findings FROM pipeline_research WHERE project_id = $1`,
+    [project.id]
+  );
+  const sectionStatus: Record<string, string> = {};
+  for (const row of existingRes.rows) {
+    sectionStatus[row.section] = row.status;
+    if (row.status === "complete" && row.findings) {
+      try {
+        accumulatedFindings[row.section] = { findings: typeof row.findings === "string" ? JSON.parse(row.findings) : row.findings };
+      } catch { /* ignore parse errors */ }
+      completedCount++;
+    }
+  }
+  // Reset any sections stuck in_progress (stale from previous container)
+  for (const row of existingRes.rows) {
+    if (row.status === "in_progress") {
+      await pgQuery(
+        `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+        [project.id, row.section]
+      );
+      sectionStatus[row.section] = "pending";
+      log("info", "research", row.section, `Reset stale in_progress section for ${project.slug}`);
+    }
+  }
+
+  if (completedCount === totalSections) {
+    log("info", "research", "pipeline", `All ${totalSections} sections already complete for ${project.slug} — skipping`);
+    return;
+  }
+  log("info", "research", "pipeline", `Resuming ${project.slug}: ${completedCount}/${totalSections} already complete`);
 
   // Load user preferences once for the project context
   let projectPreferences: any[] = [];
@@ -260,183 +534,206 @@ async function runResearchPipeline(project: { id: number; slug: string; name: st
     log("warn", "research", "preferences", `Failed to load preferences: ${prefErr.message}`);
   }
 
-  for (const section of RESEARCH_SECTIONS) {
-    try {
-      const apiKey = DIFY_SECTION_KEYS[section];
-      if (!apiKey) {
-        await ntfyError("research", section, `No Dify API key configured for section: ${section}`, { slug: project.slug });
-        continue;
-      }
+  // Process a single research section (extracted for parallel execution)
+  async function processSection(section: string): Promise<void> {
+    // Skip already-completed sections
+    if (sectionStatus[section] === "complete") {
+      sectionStats.push({ section, status: "skipped", error: "Already complete" });
+      return;
+    }
 
-      // Mark section as in_progress
+    const apiKey = DIFY_SECTION_KEYS[section];
+    if (!apiKey) {
+      sectionStats.push({ section, status: "skipped", error: "No Dify API key configured" });
+      return;
+    }
+
+    // Mark section as in_progress
+    await pgQuery(
+      `UPDATE pipeline_research SET status = 'in_progress', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+      [project.id, section]
+    );
+
+    log("info", "research", section, `Starting section for ${project.slug}`);
+
+    // Get section-specific preferences
+    let sectionPreferences = projectPreferences;
+    const prefQuery = SECTION_PREF_QUERIES[section];
+    if (prefQuery) {
+      try {
+        const sectionSpecific = await searchPreferences(prefQuery, 10);
+        const seen = new Set(sectionPreferences.map((p: any) => p.id));
+        for (const sp of sectionSpecific) {
+          if (!seen.has(sp.id)) {
+            sectionPreferences = [...sectionPreferences, sp];
+            seen.add(sp.id);
+          }
+        }
+      } catch { /* use base preferences */ }
+    }
+
+    // Build inputs — only pass findings from upstream dependencies, not all accumulated
+    const deps = SECTION_DEPENDENCIES[section] || [];
+    const upstreamFindings: Record<string, any> = {};
+    for (const dep of deps) {
+      if (accumulatedFindings[dep]) upstreamFindings[dep] = accumulatedFindings[dep];
+    }
+
+    const inputs: Record<string, string> = {
+      project_name: project.name,
+      project_description: project.description || "",
+      section,
+      server_context: serverContext,
+      existing_findings: Object.keys(upstreamFindings).length > 0
+        ? JSON.stringify(upstreamFindings).slice(0, 45000)
+        : "",
+      user_preferences: sectionPreferences.length > 0
+        ? JSON.stringify(sectionPreferences.map((p: any) => ({
+            domain: p.domain, topic: p.topic, context: p.context,
+            preference: p.preference, anti_pattern: p.anti_pattern,
+            examples: p.examples, confidence: p.confidence,
+          })))
+        : "",
+    };
+
+    const difyResponse = await callDify(apiKey, inputs, `research-${section}`);
+
+    const data = difyResponse?.data;
+    if (!data || data.status !== "succeeded") {
+      const errMsg = data?.error || "Dify workflow did not succeed";
+      log("error", "research", section, `Dify failed for ${project.slug}: ${errMsg}`);
       await pgQuery(
-        `UPDATE pipeline_research SET status = 'in_progress', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+        `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
         [project.id, section]
       );
+      sectionStats.push({ section, status: "failed", error: errMsg });
+      return;
+    }
 
-      log("info", "research", section, `Starting section for ${project.slug}`);
+    // Parse the result
+    let findings: any = null;
+    let concerns: string[] = [];
+    let recommendations: string[] = [];
+    let confidenceScore: number | null = null;
+    let questions: Array<{ question: string; context: string; priority: string }> = [];
 
-      // Get section-specific preferences
-      let sectionPreferences = projectPreferences;
-      const prefQuery = SECTION_PREF_QUERIES[section];
-      if (prefQuery) {
-        try {
-          const sectionSpecific = await searchPreferences(prefQuery, 10);
-          // Merge and deduplicate by ID
-          const seen = new Set(sectionPreferences.map((p: any) => p.id));
-          for (const sp of sectionSpecific) {
-            if (!seen.has(sp.id)) {
-              sectionPreferences = [...sectionPreferences, sp];
-              seen.add(sp.id);
-            }
-          }
-        } catch { /* use base preferences */ }
+    const resultRaw = data.outputs?.result;
+    if (resultRaw) {
+      try {
+        const parsed = typeof resultRaw === "string" ? JSON.parse(resultRaw) : resultRaw;
+        findings = parsed.findings ?? null;
+        concerns = Array.isArray(parsed.concerns) ? parsed.concerns : [];
+        recommendations = Array.isArray(parsed.recommendations) ? parsed.recommendations : [];
+        confidenceScore = typeof parsed.confidence_score === "number" ? parsed.confidence_score : null;
+        questions = Array.isArray(parsed.questions) ? parsed.questions : [];
+      } catch {
+        findings = { raw: resultRaw };
       }
+    }
 
-      // Build inputs with accumulated findings and preferences
-      const inputs: Record<string, string> = {
-        project_name: project.name,
-        project_description: project.description || "",
-        section,
-        server_context: serverContext,
-        existing_findings: Object.keys(accumulatedFindings).length > 0
-          ? JSON.stringify(accumulatedFindings)
-          : "",
-        user_preferences: sectionPreferences.length > 0
-          ? JSON.stringify(sectionPreferences.map((p: any) => ({
-              domain: p.domain, topic: p.topic, context: p.context,
-              preference: p.preference, anti_pattern: p.anti_pattern,
-              examples: p.examples, confidence: p.confidence,
-            })))
-          : "",
-      };
+    // Accumulate findings for downstream tiers
+    if (findings) {
+      accumulatedFindings[section] = { findings, concerns, recommendations, confidence_score: confidenceScore };
+    }
 
-      const difyResponse = await callDify(apiKey, inputs, `research-${section}`);
+    // Update PG
+    await pgQuery(
+      `UPDATE pipeline_research
+       SET findings = $1, concerns = $2, recommendations = $3, confidence_score = $4, status = 'complete', updated_at = NOW()
+       WHERE project_id = $5 AND section = $6`,
+      [findings ? JSON.stringify(findings) : null, concerns, recommendations, confidenceScore, project.id, section]
+    );
 
-      // Parse the Dify response
-      const data = difyResponse?.data;
-      if (!data || data.status !== "succeeded") {
-        const errMsg = data?.error || "Dify workflow did not succeed";
-        log("error", "research", section, `Dify failed for ${project.slug}: ${errMsg}`);
-        await pgQuery(
-          `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
-          [project.id, section]
-        );
-        await ntfyNotify(
-          `Research FAILED for ${project.name} / ${section}: ${errMsg}`,
-          "Research Section Failed",
-          4,
-          ["x"]
-        );
-        continue;
-      }
-
-      // Parse the result string - may be JSON or plain text
-      let findings: any = null;
-      let concerns: string[] = [];
-      let recommendations: string[] = [];
-      let confidenceScore: number | null = null;
-      let questions: Array<{ question: string; context: string; priority: string }> = [];
-
-      const resultRaw = data.outputs?.result;
-      if (resultRaw) {
-        try {
-          const parsed = typeof resultRaw === "string" ? JSON.parse(resultRaw) : resultRaw;
-          findings = parsed.findings ?? null;
-          concerns = Array.isArray(parsed.concerns) ? parsed.concerns : [];
-          recommendations = Array.isArray(parsed.recommendations) ? parsed.recommendations : [];
-          confidenceScore = typeof parsed.confidence_score === "number" ? parsed.confidence_score : null;
-          questions = Array.isArray(parsed.questions) ? parsed.questions : [];
-        } catch {
-          // If result is not valid JSON, store the raw text as findings
-          findings = { raw: resultRaw };
-        }
-      }
-
-      // Accumulate findings for downstream sections
-      if (findings) {
-        accumulatedFindings[section] = {
-          findings,
-          concerns,
-          recommendations,
-          confidence_score: confidenceScore,
-        };
-      }
-
-      // Update the research section in PG
+    // Dual-write to GitLab
+    try {
+      const mdContent = findingsToMarkdown(section, findings, concerns, recommendations);
+      const repo = getRepoForModule("tech-research");
+      const filePath = await writeResearchDoc(project.slug, repo, "tech-research", section, mdContent, {
+        status: "complete", confidence: confidenceScore ?? undefined, model: "dify/research-" + section,
+      });
       await pgQuery(
-        `UPDATE pipeline_research
-         SET findings = $1, concerns = $2, recommendations = $3, confidence_score = $4, status = 'complete', updated_at = NOW()
-         WHERE project_id = $5 AND section = $6`,
-        [
-          findings ? JSON.stringify(findings) : null,
-          concerns,
-          recommendations,
-          confidenceScore,
-          project.id,
-          section,
-        ]
+        `UPDATE pipeline_research SET file_path = $1, repo = $2 WHERE project_id = $3 AND section = $4`,
+        [filePath, "dev-research", project.id, section]
       );
+    } catch (fileErr: any) {
+      log("warn", "research", section, `File write failed (non-blocking): ${fileErr.message}`);
+    }
 
-      // Insert any questions
-      for (const q of questions) {
-        try {
-          await pgQuery(
-            `INSERT INTO pipeline_questions (project_id, question, context, priority)
-             VALUES ($1, $2, $3, $4)`,
-            [project.id, q.question, q.context || null, q.priority || "normal"]
-          );
-        } catch (qErr: any) {
-          log("warn", "research", section, `Failed to insert question for ${project.slug}: ${qErr.message}`);
-        }
-      }
-
-      completedCount++;
-      const elapsed = data.elapsed_time ? `${data.elapsed_time.toFixed(1)}s` : "?";
-      const tokens = data.total_tokens || "?";
-
-      await ntfyNotify(
-        `${project.name} / ${section} complete (${elapsed}, ${tokens} tokens). ${completedCount}/${totalSections} done.`,
-        "Research Section Done",
-        3,
-        ["microscope"]
-      );
-
-      log("info", "research", section, `Complete for ${project.slug} (${elapsed}, ${tokens} tokens)`);
-
-    } catch (err: any) {
-      log("error", "research", section, `Error for ${project.slug}: ${err.message}`);
-      // Mark section back to pending so it can be retried
+    // Insert questions
+    for (const q of questions) {
       try {
         await pgQuery(
-          `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
-          [project.id, section]
+          `INSERT INTO pipeline_questions (project_id, question, context, priority) VALUES ($1, $2, $3, $4)`,
+          [project.id, q.question, q.context || null, q.priority || "normal"]
         );
-      } catch { /* ignore */ }
-
-      await ntfyNotify(
-        `Research ERROR for ${project.name} / ${section}: ${err.message}`,
-        "Research Section Error",
-        4,
-        ["x"]
-      );
+      } catch (qErr: any) {
+        log("warn", "research", section, `Failed to insert question: ${qErr.message}`);
+      }
     }
+
+    completedCount++;
+    const elapsed = data.elapsed_time ? `${data.elapsed_time.toFixed(1)}s` : "?";
+    const tokens = data.total_tokens || "?";
+    sectionStats.push({ section, status: "success", elapsed, tokens: typeof tokens === "number" ? tokens : undefined });
+    log("info", "research", section, `Complete for ${project.slug} (${elapsed}, ${tokens} tokens)`);
   }
 
-  // Final summary notification
-  const failedCount = totalSections - completedCount;
-  const summaryMsg = failedCount === 0
-    ? `All ${totalSections} research sections complete for ${project.name}!`
-    : `Research finished for ${project.name}: ${completedCount}/${totalSections} succeeded, ${failedCount} failed.`;
-  const summaryPriority = failedCount === 0 ? 4 : 3;
-  const summaryTag = failedCount === 0 ? "white_check_mark" : "warning";
+  // ── Tiered Parallel Execution (Kahn's algorithm) ──────────
+  try {
+    // Filter to sections that still need processing
+    const pending = RESEARCH_SECTIONS.filter(s => sectionStatus[s] !== "complete");
+    const tiers = kahnTieredSort(pending, SECTION_DEPENDENCIES);
+    log("info", "research", "pipeline", `Execution plan for ${project.slug}: ${tiers.map((t, i) => `T${i}[${t.join(",")}]`).join(" → ")}`);
 
-  await ntfyNotify(summaryMsg, "Research Pipeline Complete", summaryPriority, [summaryTag]);
+    for (let i = 0; i < tiers.length; i++) {
+      const tier = tiers[i];
+      log("info", "research", "tier", `Tier ${i}: running ${tier.length} section(s) in parallel [${tier.join(", ")}]`);
+
+      const results = await Promise.allSettled(tier.map(section => processSection(section)));
+
+      // Log any rejected promises (unexpected errors not caught inside processSection)
+      for (let j = 0; j < results.length; j++) {
+        if (results[j].status === "rejected") {
+          const err = (results[j] as PromiseRejectedResult).reason;
+          log("error", "research", tier[j], `Uncaught error for ${project.slug}: ${err?.message || err}`);
+          try {
+            await pgQuery(
+              `UPDATE pipeline_research SET status = 'pending', updated_at = NOW() WHERE project_id = $1 AND section = $2`,
+              [project.id, tier[j]]
+            );
+          } catch { /* ignore */ }
+          sectionStats.push({ section: tier[j], status: "error", error: err?.message || "Unknown error" });
+        }
+      }
+    }
+  } catch (crashErr: any) {
+    log("error", "research", "pipeline", `Pipeline CRASHED for ${project.slug}: ${crashErr.message}`);
+    await mmPipelineUpdate(project.name, buildResearchReport(project.name, sectionStats, crashErr.message), "rotating_light");
+    throw crashErr;
+  }
+
+  // Final summary notification — single report with all section results
+  const failedCount = totalSections - completedCount;
+  await mmPipelineUpdate(project.name, buildResearchReport(project.name, sectionStats), failedCount === 0 ? "white_check_mark" : "warning");
 
   await pgQuery(
     `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
     [project.id, "research_pipeline_complete", JSON.stringify({ completed: completedCount, failed: failedCount, total: totalSections })]
   );
+
+  // Generate tech-research module summary from accumulated findings
+  try {
+    const summaryFindings = Object.entries(accumulatedFindings).map(([sec, data]) => ({
+      section: sec,
+      content: findingsToMarkdown(sec, (data as any).findings, (data as any).concerns, (data as any).recommendations),
+    }));
+    if (summaryFindings.length > 0) {
+      await generateModuleSummary(project.slug, "tech-research", summaryFindings);
+      log("info", "research", "summary", `Generated tech-research summary for ${project.slug}`);
+    }
+  } catch (sumErr: any) {
+    log("warn", "research", "summary", `Module summary generation failed (non-blocking): ${sumErr.message}`);
+  }
 
   log("info", "research", "pipeline", `Pipeline finished for ${project.slug}: ${completedCount}/${totalSections} succeeded`);
 }
@@ -484,17 +781,35 @@ async function ensureWorkspace(project: any): Promise<void> {
 async function pushMicroagent(project: any): Promise<void> {
   const encoded = encodeURIComponent(SANDBOX_REPO);
 
-  // Gather research context
-  const research = await pgQuery(
-    `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
-    [project.id]
-  );
-  const arch = research.rows.find((r: any) => r.section === 'architecture-design')?.findings || "";
-  const security = research.rows.find((r: any) => r.section === 'security-assessment')?.findings || "";
+  // Gather research context — prefer file reads, fall back to DB
+  let archStr = "";
+  let secStr = "";
   const techStack = JSON.stringify(project.scope_of_work?.tech_stack || {}, null, 2);
 
-  const archStr = typeof arch === "string" ? arch.slice(0, 5000) : JSON.stringify(arch).slice(0, 5000);
-  const secStr = typeof security === "string" ? security.slice(0, 3000) : JSON.stringify(security).slice(0, 3000);
+  try {
+    const archDoc = await readResearchDoc(project.slug, getRepoForModule("architecture"), "architecture", "architecture-design");
+    if (archDoc) archStr = archDoc.content.slice(0, 5000);
+  } catch { /* fall through to DB */ }
+  try {
+    const secDoc = await readResearchDoc(project.slug, getRepoForModule("security-review"), "security-review", "security-review");
+    if (secDoc) secStr = secDoc.content.slice(0, 3000);
+  } catch { /* fall through to DB */ }
+
+  // DB fallback
+  if (!archStr || !secStr) {
+    const research = await pgQuery(
+      `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
+      [project.id]
+    );
+    if (!archStr) {
+      const arch = research.rows.find((r: any) => r.section === 'architecture-design')?.findings || "";
+      archStr = (typeof arch === "string" ? arch : JSON.stringify(arch)).slice(0, 5000);
+    }
+    if (!secStr) {
+      const security = research.rows.find((r: any) => r.section === 'security-assessment')?.findings || "";
+      secStr = (typeof security === "string" ? security : JSON.stringify(security)).slice(0, 3000);
+    }
+  }
 
   const microagentContent = `# ${project.name} - Project Guidelines\n\n## Architecture\n${archStr}\n\n## Security Requirements\n${secStr}\n\n## Tech Stack\n${techStack}\n`;
 
@@ -525,6 +840,189 @@ async function pushMicroagent(project: any): Promise<void> {
     }
   }
   log("info", "execution", "microagent", `Microagent pushed for ${project.slug}`);
+}
+
+
+// ── SoW Generation via OpenRouter ────────────────────────────
+
+interface FortuneFiveSow {
+  executive_summary: string;
+  overview: string;
+  objectives: Array<{ objective: string; success_metric: string; target: string }>;
+  scope: { in_scope: string[]; out_of_scope: string[] };
+  deliverables: Array<{ name: string; description: string; acceptance_criteria: string; sprint_delivery: number }>;
+  architecture: string;
+  tech_stack: Record<string, string[]>;
+  sprints: Array<{
+    sprint_number: number;
+    name: string;
+    description: string;
+    complexity: "low" | "medium" | "high" | "extreme";
+    estimated_hours: number;
+    tasks: Array<{ task: string; estimated_hours: number; status: string; dependencies?: string[] }>;
+  }>;
+  milestones: Array<{ name: string; sprint: number; criteria: string; deliverables: string[] }>;
+  risks: Array<{ risk: string; likelihood: "Low" | "Medium" | "High"; impact: "Low" | "Medium" | "High"; severity: "Low" | "Medium" | "High" | "Critical"; mitigation: string }>;
+  acceptance_criteria: Array<{ criterion: string; measurement: string; target: string }>;
+  assumptions: string[];
+  constraints: string[];
+  level_of_effort: { total_hours: number; total_sprints: number; duration_weeks: number; complexity_distribution: Record<string, number> };
+}
+
+function validateSow(sow: any): string[] {
+  const errors: string[] = [];
+  if (!sow.executive_summary || sow.executive_summary.length < 100) errors.push("executive_summary must be >100 characters");
+  if (!sow.overview || sow.overview.length < 50) errors.push("overview is missing or too short");
+  if (!Array.isArray(sow.objectives) || sow.objectives.length < 3) errors.push("Need at least 3 objectives");
+  if (!sow.scope?.in_scope?.length) errors.push("scope.in_scope is empty");
+  if (!sow.scope?.out_of_scope?.length) errors.push("scope.out_of_scope is empty");
+  if (!Array.isArray(sow.deliverables) || sow.deliverables.length < 3) errors.push("Need at least 3 deliverables");
+  for (const d of sow.deliverables || []) {
+    if (!d.description) errors.push(`Deliverable '${d.name}' missing description`);
+    if (!d.acceptance_criteria) errors.push(`Deliverable '${d.name}' missing acceptance_criteria`);
+  }
+  if (!sow.architecture || sow.architecture.length < 50) errors.push("architecture is missing or too short");
+  if (!sow.tech_stack || Object.keys(sow.tech_stack).length === 0) errors.push("tech_stack is empty");
+  if (!Array.isArray(sow.sprints) || sow.sprints.length === 0) errors.push("sprints array is empty");
+  if (!Array.isArray(sow.milestones) || sow.milestones.length === 0) errors.push("milestones array is empty");
+  if (!Array.isArray(sow.risks) || sow.risks.length < 3) errors.push("Need at least 3 risks");
+  for (const r of sow.risks || []) {
+    if (!r.mitigation || r.mitigation.length < 10) errors.push(`Risk '${r.risk}' has empty or trivial mitigation`);
+  }
+  if (!Array.isArray(sow.acceptance_criteria) || sow.acceptance_criteria.length < 3) errors.push("Need at least 3 acceptance_criteria");
+  if (!Array.isArray(sow.assumptions) || sow.assumptions.length === 0) errors.push("assumptions is empty");
+  if (!Array.isArray(sow.constraints) || sow.constraints.length === 0) errors.push("constraints is empty");
+  if (!sow.level_of_effort?.total_hours) errors.push("level_of_effort.total_hours is missing");
+  // Check for empty strings in arrays
+  for (const key of ["assumptions", "constraints"] as const) {
+    if (Array.isArray(sow[key])) {
+      for (const item of sow[key]) {
+        if (typeof item === "string" && item.trim() === "") errors.push(`Empty string in ${key}`);
+      }
+    }
+  }
+  return errors;
+}
+
+const SOW_SYSTEM_PROMPT = `You are a senior engagement manager at McKinsey & Company preparing a Statement of Work for a Fortune 500 client. You produce structured, comprehensive SOW documents that meet the highest standards of tier-1 consulting firms.
+
+Rules:
+- Output ONLY valid JSON. No markdown, no code fences, no commentary.
+- Every field must contain substantive, specific content. Generic placeholder text is unacceptable.
+- Each section must demonstrate deep understanding of the project requirements.
+- Risk mitigations: Every risk MUST have a detailed, actionable mitigation strategy. An empty mitigation column is a career-ending mistake at a tier-1 firm.
+- Executive summary: Write as if presenting to a C-suite audience. Lead with business impact, not technical details.
+- Objectives must be SMART (Specific, Measurable, Achievable, Relevant, Time-bound).
+- Deliverables must each have full description AND acceptance criteria.
+- Sprint tasks must have realistic hour estimates that sum correctly.
+- Do not use markdown formatting in string values (no **, no #, no backticks). The PDF renderer handles formatting.`;
+
+async function generateCompleteSow(project: {
+  id: number; slug: string; name: string; description: string | null;
+  priority?: number; tags?: string[]; estimated_hours?: number;
+}): Promise<FortuneFiveSow> {
+  log("info", "sow", "generate", `Generating Fortune 500 SoW for ${project.slug}`);
+
+  // Gather ALL research data
+  const researchRows = await pgQuery(
+    `SELECT section, findings, concerns, recommendations FROM pipeline_research WHERE project_id = $1 AND findings IS NOT NULL AND status = 'complete'`,
+    [project.id]
+  );
+  const researchData: Record<string, any> = {};
+  for (const row of researchRows.rows) {
+    researchData[row.section] = {
+      findings: row.findings,
+      concerns: row.concerns,
+      recommendations: row.recommendations,
+    };
+  }
+
+  const userPrompt = `Generate a comprehensive Statement of Work JSON for this project.
+
+PROJECT: ${project.name}
+DESCRIPTION: ${project.description || "No description provided"}
+PRIORITY: ${project.priority || "N/A"}
+TAGS: ${JSON.stringify(project.tags || [])}
+ESTIMATED HOURS: ${project.estimated_hours || "To be determined based on analysis"}
+
+RESEARCH DATA (from completed pipeline analysis):
+${JSON.stringify(researchData, null, 2).slice(0, 45000)}
+
+Return a JSON object with exactly these fields:
+- executive_summary (string, 2-3 paragraphs, strategic business value)
+- overview (string, project background, business drivers, problem statement)
+- objectives (array of {objective, success_metric, target}, minimum 3, SMART format)
+- scope ({in_scope: string[], out_of_scope: string[]})
+- deliverables (array of {name, description, acceptance_criteria, sprint_delivery}, minimum 3)
+- architecture (string, technical architecture, component breakdown)
+- tech_stack (object mapping category names to string arrays, e.g. {"Frontend": ["React 18", "TypeScript"]})
+- sprints (array of {sprint_number, name, description, complexity, estimated_hours, tasks: [{task, estimated_hours, status, dependencies?}]})
+- milestones (array of {name, sprint, criteria, deliverables: string[]})
+- risks (array of {risk, likelihood, impact, severity, mitigation}, minimum 3. EVERY risk MUST have a substantive mitigation)
+- acceptance_criteria (array of {criterion, measurement, target}, minimum 3)
+- assumptions (string array, minimum 2)
+- constraints (string array, minimum 2)
+- level_of_effort ({total_hours, total_sprints, duration_weeks, complexity_distribution: {"low": N, "medium": N, "high": N, "extreme": N}})
+
+Output ONLY the JSON object. No markdown, no explanation.`;
+
+  const callLlm = async (correctionNote?: string): Promise<FortuneFiveSow> => {
+    const messages: Array<{ role: string; content: string }> = [
+      { role: "system", content: SOW_SYSTEM_PROMPT },
+      { role: "user", content: correctionNote ? `${userPrompt}\n\nCORRECTION NEEDED: ${correctionNote}` : userPrompt },
+    ];
+
+    const raw = await openrouterChat("anthropic/claude-sonnet-4.5", messages, 16000, 0.3, 180000);
+
+    // Extract JSON from response (handle potential markdown wrapping)
+    let jsonStr = raw.trim();
+    if (jsonStr.startsWith("```")) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "");
+    }
+    return JSON.parse(jsonStr);
+  };
+
+  // First attempt
+  let sow: FortuneFiveSow;
+  try {
+    sow = await callLlm();
+  } catch (err: any) {
+    log("error", "sow", "generate", `First LLM call failed: ${err.message}`);
+    await mmError("sow", "generate", `SoW generation LLM call failed for ${project.name}: ${err.message}`);
+    throw new Error(`SoW generation failed: ${err.message}`);
+  }
+
+  // Validate
+  let validationErrors = validateSow(sow);
+  if (validationErrors.length > 0) {
+    log("warn", "sow", "validate", `First attempt had ${validationErrors.length} issues, retrying`, { errors: validationErrors });
+
+    // Retry with corrective prompt
+    try {
+      sow = await callLlm(`The previous response failed validation. Fix these issues:\n${validationErrors.map(e => `- ${e}`).join("\n")}`);
+      validationErrors = validateSow(sow);
+    } catch (retryErr: any) {
+      log("error", "sow", "generate", `Retry LLM call failed: ${retryErr.message}`);
+      await mmError("sow", "generate", `SoW generation retry failed for ${project.name}: ${retryErr.message}`);
+      throw new Error(`SoW generation retry failed: ${retryErr.message}`);
+    }
+
+    if (validationErrors.length > 0) {
+      const errMsg = `SoW validation failed after retry for ${project.name}: ${validationErrors.join(", ")}`;
+      log("error", "sow", "validate", errMsg);
+      await mmError("sow", "validate", errMsg);
+      throw new Error(errMsg);
+    }
+  }
+
+  log("info", "sow", "generate", `SoW generated successfully for ${project.slug}`, {
+    sections: Object.keys(sow).length,
+    sprints: sow.sprints.length,
+    risks: sow.risks.length,
+    total_hours: sow.level_of_effort.total_hours,
+  });
+
+  return sow;
 }
 
 function parseSowIntoSprints(sow: any): any[] {
@@ -593,18 +1091,43 @@ async function runSprintExecution(project: any, sprintNumber: number, feedback?:
   let detailedPrompt = codingPrompt;
 
   try {
-    // Gather all context: architecture, security findings
-    const research = await pgQuery(
-      `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
-      [project.id]
-    );
-    const archFindings = research.rows.find((r: any) => r.section === 'architecture-design')?.findings || "";
-    const fileStructure = research.rows.find((r: any) => r.section === 'file-structure')?.findings || "";
-    const securityFindings = research.rows.find((r: any) => r.section === 'security-assessment')?.findings || "";
+    // Gather all context — prefer file reads, fall back to DB
+    let archStr = "";
+    let fileStr = "";
+    let secStr = "";
 
-    const archStr = typeof archFindings === "string" ? archFindings : JSON.stringify(archFindings);
-    const fileStr = typeof fileStructure === "string" ? fileStructure : JSON.stringify(fileStructure);
-    const secStr = typeof securityFindings === "string" ? securityFindings : JSON.stringify(securityFindings);
+    try {
+      const archDoc = await readResearchDoc(project.slug, getRepoForModule("architecture"), "architecture", "architecture-design");
+      if (archDoc) archStr = archDoc.content;
+    } catch { /* fall through */ }
+    try {
+      const fileDoc = await readResearchDoc(project.slug, getRepoForModule("tech-research"), "tech-research", "file-structure");
+      if (fileDoc) fileStr = fileDoc.content;
+    } catch { /* fall through */ }
+    try {
+      const secDoc = await readResearchDoc(project.slug, getRepoForModule("security-review"), "security-review", "security-review");
+      if (secDoc) secStr = secDoc.content;
+    } catch { /* fall through */ }
+
+    // DB fallback for any missing
+    if (!archStr || !fileStr || !secStr) {
+      const research = await pgQuery(
+        `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
+        [project.id]
+      );
+      if (!archStr) {
+        const f = research.rows.find((r: any) => r.section === 'architecture-design')?.findings || "";
+        archStr = typeof f === "string" ? f : JSON.stringify(f);
+      }
+      if (!fileStr) {
+        const f = research.rows.find((r: any) => r.section === 'file-structure')?.findings || "";
+        fileStr = typeof f === "string" ? f : JSON.stringify(f);
+      }
+      if (!secStr) {
+        const f = research.rows.find((r: any) => r.section === 'security-assessment')?.findings || "";
+        secStr = typeof f === "string" ? f : JSON.stringify(f);
+      }
+    }
 
     const difyKey = DIFY_DEVTEAM_KEYS["pm-generate-task-prompts"];
     if (difyKey && difyKey.startsWith("app-")) {
@@ -663,7 +1186,7 @@ ${JSON.stringify(project.scope_of_work?.tech_stack || {}, null, 2)}`;
     // Fire-and-forget monitoring
     monitorCodingSession(project, sprintRow, session.conversation_id, branchName).catch(async (err) => {
       log("error", "execution", "monitor", `Session monitor crashed: ${err.message}`);
-      await ntfyError("execution", "monitor", `Monitor crashed for ${project.slug} sprint ${sprintNumber}: ${err.message}`, {});
+      await mmError("execution", "monitor", `Monitor crashed for ${project.slug} sprint ${sprintNumber}: ${err.message}`, {});
     });
   } catch (err: any) {
     log("error", "execution", "session", `Failed to create coding session: ${err.message}`);
@@ -691,9 +1214,25 @@ async function monitorCodingSession(project: any, sprintRow: any, conversationId
         try {
           const reviewKey = DIFY_DEVTEAM_KEYS["code-reviewer"];
           if (reviewKey && reviewKey.startsWith("app-")) {
+            // Fetch real diff from GitLab Compare API
+            let codeDiff = `Branch: ${branchName} (full diff unavailable)`;
+            try {
+              const SANDBOX_REPO = process.env.OPENHANDS_SANDBOX_REPO || "homelab-projects/openhands-sandbox";
+              const compareRes = await gitlabFetch(
+                `/api/v4/projects/${encodeURIComponent(SANDBOX_REPO)}/repository/compare?from=main&to=${encodeURIComponent(branchName)}&straight=true`
+              );
+              if (compareRes?.diffs) {
+                const diffParts = compareRes.diffs.map((d: any) =>
+                  `--- ${d.old_path}\n+++ ${d.new_path}\n${d.diff || "(binary file)"}`
+                );
+                codeDiff = diffParts.join("\n\n").slice(0, 30000);
+              }
+            } catch (diffErr: any) {
+              log("warn", "execution", "diff", `Failed to fetch diff: ${diffErr.message}`);
+            }
             const reviewResult = await callDify(reviewKey, {
               project_name: project.name,
-              code_diff: `Branch: ${branchName} (see sandbox repo for full diff)`,
+              code_diff: codeDiff,
               sprint_tasks: JSON.stringify(sprintRow.tasks || []),
             }, "code-reviewer");
             if (reviewResult?.data?.status === "succeeded") {
@@ -710,12 +1249,20 @@ async function monitorCodingSession(project: any, sprintRow: any, conversationId
         try {
           const architectKey = DIFY_DEVTEAM_KEYS["architect-revise"];
           if (architectKey && architectKey.startsWith("app-")) {
-            const research = await pgQuery(
-              `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND section = 'architecture-design' AND status = 'complete'`,
-              [project.id]
-            );
-            const archFindings = research.rows[0]?.findings || "";
-            const archStr = typeof archFindings === "string" ? archFindings : JSON.stringify(archFindings);
+            // Prefer file read, fall back to DB
+            let archStr = "";
+            try {
+              const archDoc = await readResearchDoc(project.slug, getRepoForModule("architecture"), "architecture", "architecture-design");
+              if (archDoc) archStr = archDoc.content;
+            } catch { /* fall through */ }
+            if (!archStr) {
+              const research = await pgQuery(
+                `SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND section = 'architecture-design' AND status = 'complete'`,
+                [project.id]
+              );
+              const archFindings = research.rows[0]?.findings || "";
+              archStr = typeof archFindings === "string" ? archFindings : JSON.stringify(archFindings);
+            }
 
             const archReview = await callDify(architectKey, {
               project_name: project.name,
@@ -747,12 +1294,22 @@ async function monitorCodingSession(project: any, sprintRow: any, conversationId
           sprint_number: sprintRow.sprint_number,
         });
 
+        // Mark coding_session agent_task as pending_review
+        await pgQuery(
+          `UPDATE agent_tasks SET status = 'pending_review', completed_at = NOW() WHERE project_id = $1 AND sprint_id = $2 AND task_type = 'coding_session' AND status = 'running'`,
+          [project.id, sprintRow.id],
+        );
+
         return;
       }
 
       if (convStatus === "ERROR" || convStatus === "error") {
         log("error", "execution", "monitor", `Session ${conversationId} errored`);
         await pgQuery(`UPDATE pipeline_sprints SET status = 'pending' WHERE id = $1`, [sprintRow.id]);
+        await pgQuery(
+          `UPDATE agent_tasks SET status = 'failed', completed_at = NOW() WHERE project_id = $1 AND sprint_id = $2 AND task_type = 'coding_session' AND status = 'running'`,
+          [project.id, sprintRow.id],
+        );
         await mmPipelineUpdate(project.name, `Sprint ${sprintRow.sprint_number} coding session errored: ${conversationId}`, "x");
         return;
       }
@@ -768,10 +1325,352 @@ async function monitorCodingSession(project: any, sprintRow: any, conversationId
 
   // Timed out
   log("warn", "execution", "monitor", `Session ${conversationId} timed out after ${MAX_POLLS * POLL_INTERVAL / 60000} minutes`);
+  await pgQuery(
+    `UPDATE agent_tasks SET status = 'failed', completed_at = NOW() WHERE project_id = $1 AND sprint_id = $2 AND task_type = 'coding_session' AND status = 'running'`,
+    [project.id, sprintRow.id],
+  );
+  await pgQuery(`UPDATE pipeline_sprints SET status = 'pending' WHERE id = $1`, [sprintRow.id]);
   await mmPipelineUpdate(project.name, `Sprint ${sprintRow.sprint_number} coding session timed out`, "warning");
 }
 
 
+
+// ── Overwatch Helper Functions ────────────────────────────────────────────────
+
+function deriveStage(activeModules: string[], moduleProgress: Record<string, string>): string {
+  if (!activeModules || activeModules.length === 0) return "queue";
+  const statuses = Object.values(moduleProgress || {});
+  if (statuses.length > 0 && statuses.every((s) => s === "completed")) return "completed";
+  if (moduleProgress["sprint-planning"] === "in-progress" || moduleProgress["sprint-planning"] === "completed") return "planning";
+  if (moduleProgress["security-review"] === "in-progress" || moduleProgress["security-review"] === "completed") return "security-review";
+  if (moduleProgress["architecture"] === "in-progress" || moduleProgress["architecture"] === "completed") return "architecture";
+  if (moduleProgress["tech-research"] === "in-progress" || moduleProgress["tech-research"] === "completed") return "research";
+  return "research";
+}
+
+function getReadyModules(activeModules: string[], moduleProgress: Record<string, string>): string[] {
+  const ready: string[] = [];
+  for (const modId of activeModules) {
+    const mod = MODULE_REGISTRY[modId];
+    if (!mod) continue;
+    const status = moduleProgress[modId];
+    if (status && status !== "pending") continue;
+    const hardDepsOk = mod.dependsOn.every((dep) => moduleProgress[dep] === "completed");
+    if (hardDepsOk) ready.push(modId);
+  }
+  return ready;
+}
+
+function applyCoercionRules(projectType: string, modules: string[]): string[] {
+  const result = new Set(modules);
+  for (const [modId, mod] of Object.entries(MODULE_REGISTRY)) {
+    if (mod.coercionRules) {
+      const { requiredTypes, excludedTypes } = mod.coercionRules;
+      if (requiredTypes.includes(projectType)) result.add(modId);
+      if (excludedTypes && excludedTypes.includes(projectType)) result.delete(modId);
+    }
+  }
+  result.add("tech-research");
+  result.add("architecture");
+  result.add("security-review");
+  result.add("sprint-planning");
+  return Array.from(result);
+}
+
+async function startModuleAsync(slug: string, moduleId: string, project: any): Promise<void> {
+  const mod = MODULE_REGISTRY[moduleId];
+  if (!mod) { log("error", "overwatch", "start-module", `Unknown module: ${moduleId}`); return; }
+  log("info", "overwatch", "start-module", `Starting module ${mod.name} for ${slug}`);
+
+  await pgQuery(
+    `UPDATE pipeline_projects SET module_progress = COALESCE(module_progress, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE slug = $2`,
+    [JSON.stringify({ [moduleId]: "in-progress" }), slug],
+  );
+  await pgQuery(
+    `INSERT INTO pipeline_module_runs (project_id, module_id, status, started_at) VALUES ($1, $2, 'in_progress', NOW()) ON CONFLICT (project_id, module_id) DO UPDATE SET status = 'in_progress', started_at = NOW(), error = NULL`,
+    [project.id, moduleId],
+  );
+
+  try {
+    await runModulePipeline(slug, moduleId, project);
+    await pgQuery(
+      `UPDATE pipeline_projects SET module_progress = COALESCE(module_progress, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE slug = $2`,
+      [JSON.stringify({ [moduleId]: "completed" }), slug],
+    );
+    await pgQuery(`UPDATE pipeline_module_runs SET status = 'complete', completed_at = NOW() WHERE project_id = $1 AND module_id = $2`, [project.id, moduleId]);
+    log("info", "overwatch", "module-complete", `Module ${mod.name} completed for ${slug}`);
+
+    // Generate module summary after completion (non-blocking)
+    try {
+      const repo = getRepoForModule(moduleId);
+      const docs = await import("../utils/research-docs.js");
+      const sectionDocs = await docs.readResearchDocs(slug, repo, moduleId);
+      if (sectionDocs.length > 0) {
+        const findings = sectionDocs.map(d => ({ section: d.meta.section || d.path, content: d.content }));
+        await generateModuleSummary(slug, moduleId, findings);
+        log("info", "overwatch", "module-summary", `Generated summary for ${moduleId} module of ${slug}`);
+      }
+    } catch (sumErr: any) {
+      log("warn", "overwatch", "module-summary", `Summary generation failed (non-blocking): ${sumErr.message}`);
+    }
+
+    await mmPipelineUpdate(project.name, `Module "${mod.name}" completed`, "success");
+    await advanceModule(slug, moduleId);
+  } catch (err: any) {
+    await pgQuery(
+      `UPDATE pipeline_projects SET module_progress = COALESCE(module_progress, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE slug = $2`,
+      [JSON.stringify({ [moduleId]: "failed" }), slug],
+    );
+    await pgQuery(`UPDATE pipeline_module_runs SET status = 'failed', completed_at = NOW(), error = $3 WHERE project_id = $1 AND module_id = $2`, [project.id, moduleId, err.message]);
+    log("error", "overwatch", "module-failed", `Module ${mod.name} failed for ${slug}: ${err.message}`);
+    await mmPipelineUpdate(project.name, `Module "${mod.name}" failed: ${err.message}`, "error");
+  }
+}
+
+/**
+ * Extract findings from a Dify API response wrapper.
+ * Handles: raw API wrapper (data.outputs.result), markdown code blocks, plain JSON.
+ */
+function extractDifyFindings(difyResponse: any): any {
+  let raw: any;
+  if (typeof difyResponse === "string") {
+    raw = difyResponse;
+  } else {
+    raw = difyResponse?.data?.outputs?.result
+      || difyResponse?.outputs?.result
+      || difyResponse?.data?.outputs
+      || difyResponse;
+  }
+  const rawStr = typeof raw === "string" ? raw : JSON.stringify(raw);
+
+  // Try to extract JSON from markdown code blocks
+  const bt = String.fromCharCode(96);
+  const startMarker = bt.repeat(3) + "json";
+  const startIdx = rawStr.indexOf(startMarker);
+  let jsonStr = rawStr;
+  if (startIdx !== -1) {
+    const afterStart = rawStr.indexOf(String.fromCharCode(10), startIdx);
+    if (afterStart !== -1) {
+      const endIdx = rawStr.indexOf(bt.repeat(3), afterStart + 1);
+      if (endIdx !== -1) {
+        jsonStr = rawStr.substring(afterStart + 1, endIdx).trim();
+      }
+    }
+  }
+
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    return { raw: rawStr };
+  }
+}
+
+async function runModulePipeline(slug: string, moduleId: string, project: any): Promise<void> {
+  const mod = MODULE_REGISTRY[moduleId];
+  if (!mod) throw new Error(`Unknown module: ${moduleId}`);
+
+  switch (moduleId) {
+    case "tech-research":
+      await runResearchPipeline({ id: project.id, slug, name: project.name, description: project.description });
+      return;
+    case "architecture": {
+      const archRes = await pgQuery(`SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND findings IS NOT NULL AND status = 'complete'`, [project.id]);
+      const researchFindings: Record<string, any> = {};
+      for (const row of archRes.rows) researchFindings[row.section] = row.findings;
+      const archResult = await callDify(DIFY_DEVTEAM_KEYS["architect-design"], {
+        project_name: project.name,
+        project_description: project.description || "",
+        research_findings: JSON.stringify(researchFindings),
+        requirements: JSON.stringify(project.tags || []),
+      }, "architect-design");
+      const archParsed = extractDifyFindings(archResult);
+      await pgQuery(
+        `INSERT INTO pipeline_research (project_id, section, status, findings, updated_at) VALUES ($1, $2, 'complete', $3, NOW()) ON CONFLICT (project_id, section) DO UPDATE SET status = 'complete', findings = $3, updated_at = NOW()`,
+        [project.id, "architecture--architecture-design", JSON.stringify(archParsed)],
+      );
+      try {
+        const mdContent = findingsToMarkdown("architecture-design", archParsed);
+        const repo = getRepoForModule("architecture");
+        const filePath = await writeResearchDoc(slug, repo, "architecture", "architecture-design", mdContent, {
+          status: "complete", model: "dify/architect-design",
+        });
+        await pgQuery(
+          `UPDATE pipeline_research SET file_path = $1, repo = $2 WHERE project_id = $3 AND section = $4`,
+          [filePath, "dev-research", project.id, "architecture--architecture-design"],
+        );
+      } catch (fileErr: any) {
+        log("warn", "overwatch", "file-write", `File write failed for architecture-design (non-blocking): ${fileErr.message}`);
+      }
+      return;
+    }
+    case "security-review": {
+      // Prefer architecture design output; fall back to research findings
+      const secArchRow = await pgQuery(
+        `SELECT findings FROM pipeline_research WHERE project_id = $1 AND section IN ('architecture--architecture-design', 'architecture') AND findings IS NOT NULL ORDER BY CASE section WHEN 'architecture--architecture-design' THEN 0 ELSE 1 END LIMIT 1`,
+        [project.id],
+      );
+      const archDesign = secArchRow.rows[0]?.findings ? JSON.stringify(secArchRow.rows[0].findings) : "No architecture design available";
+      const secTechRow = await pgQuery(`SELECT findings FROM pipeline_research WHERE project_id = $1 AND section = 'libraries' AND findings IS NOT NULL`, [project.id]);
+      const techStack = secTechRow.rows[0]?.findings ? JSON.stringify(secTechRow.rows[0].findings) : "";
+      const secResult = await callDify(DIFY_DEVTEAM_KEYS["security-review"], {
+        project_name: project.name,
+        architecture_design: archDesign,
+        tech_stack: techStack,
+      }, "security-review");
+      const secParsed = extractDifyFindings(secResult);
+      await pgQuery(
+        `INSERT INTO pipeline_research (project_id, section, status, findings, updated_at) VALUES ($1, $2, 'complete', $3, NOW()) ON CONFLICT (project_id, section) DO UPDATE SET status = 'complete', findings = $3, updated_at = NOW()`,
+        [project.id, "security-review--security-assessment", JSON.stringify(secParsed)],
+      );
+      try {
+        const mdContent = findingsToMarkdown("security-assessment", secParsed);
+        const repo = getRepoForModule("security-review");
+        const filePath = await writeResearchDoc(slug, repo, "security-review", "security-assessment", mdContent, {
+          status: "complete", model: "dify/security-review",
+        });
+        await pgQuery(
+          `UPDATE pipeline_research SET file_path = $1, repo = $2 WHERE project_id = $3 AND section = $4`,
+          [filePath, "dev-research", project.id, "security-review--security-assessment"],
+        );
+      } catch (fileErr: any) {
+        log("warn", "overwatch", "file-write", `File write failed for security-review (non-blocking): ${fileErr.message}`);
+      }
+      return;
+    }
+    case "war-room": {
+      const warResult = await startAndRunWarRoom(project.id);
+      const warSession = await pgQuery(`SELECT state FROM war_room_sessions WHERE id = $1`, [warResult.sessionId]);
+      if (warSession.rows[0]?.state === "escalated") {
+        throw new Error("War room escalated — topics need human review. Use resume_war_room after resolving.");
+      }
+      return;
+    }
+    case "sprint-planning": {
+      const sowGenerated = await generateCompleteSow(project);
+      await pgQuery(
+        `INSERT INTO pipeline_research (project_id, section, status, findings, updated_at) VALUES ($1, $2, 'complete', $3, NOW()) ON CONFLICT (project_id, section) DO UPDATE SET status = 'complete', findings = $3, updated_at = NOW()`,
+        [project.id, "sprint-planning--sow", JSON.stringify(sowGenerated)],
+      );
+      // Store SoW on the project record
+      await pgQuery(
+        `UPDATE pipeline_projects SET scope_of_work = $1, updated_at = NOW() WHERE id = $2`,
+        [JSON.stringify(sowGenerated), project.id],
+      );
+      try {
+        const mdContent = findingsToMarkdown("statement-of-work", sowGenerated);
+        const repo = getRepoForModule("sprint-planning");
+        const filePath = await writeResearchDoc(slug, repo, "sprint-planning", "sow", mdContent, {
+          status: "complete", model: "openrouter/claude-sonnet-4.5",
+        });
+        await pgQuery(
+          `UPDATE pipeline_research SET file_path = $1, repo = $2 WHERE project_id = $3 AND section = $4`,
+          [filePath, "dev-research", project.id, "sprint-planning--sow"],
+        );
+      } catch (fileErr: any) {
+        log("warn", "overwatch", "file-write", `File write failed for sprint-planning/sow (non-blocking): ${fileErr.message}`);
+      }
+      return;
+    }
+  }
+
+  if (!mod.difyKeys) { log("warn", "overwatch", "no-keys", `Module ${moduleId} has no Dify keys configured`); return; }
+
+  const existingRes = await pgQuery(`SELECT section, findings FROM pipeline_research WHERE project_id = $1 AND findings IS NOT NULL`, [project.id]);
+  const existingFindings: Record<string, any> = {};
+  for (const row of existingRes.rows) existingFindings[row.section] = row.findings;
+
+  for (const section of mod.sections) {
+    const apiKey = mod.difyKeys[section];
+    if (!apiKey) { log("warn", "overwatch", "skip-section", `No API key for ${moduleId}/${section}`); continue; }
+    log("info", "overwatch", "section", `Running ${moduleId}/${section} for ${slug}`);
+
+    try {
+      const result = await callDify(apiKey, {
+        project_name: project.name,
+        project_description: project.description || "",
+        existing_findings: JSON.stringify(existingFindings),
+        user_preferences: JSON.stringify(project.tags || []),
+        server_context: JSON.stringify({ slug, project_type: project.project_type, stage: project.stage, active_modules: project.active_modules }),
+      }, `${moduleId}/${section}`);
+
+      const parsed = extractDifyFindings(result);
+      await pgQuery(
+        `INSERT INTO pipeline_research (project_id, section, status, findings, updated_at) VALUES ($1, $2, 'complete', $3, NOW()) ON CONFLICT (project_id, section) DO UPDATE SET status = 'complete', findings = $3, updated_at = NOW()`,
+        [project.id, `${moduleId}--${section}`, JSON.stringify(parsed)],
+      );
+      existingFindings[`${moduleId}--${section}`] = parsed;
+
+      // Dual-write: persist as markdown in GitLab
+      try {
+        const mdContent = findingsToMarkdown(section, parsed);
+        const repo = getRepoForModule(moduleId);
+        const filePath = await writeResearchDoc(slug, repo, moduleId, section, mdContent, {
+          status: "complete",
+          model: `dify/${moduleId}-${section}`,
+        });
+        await pgQuery(
+          `UPDATE pipeline_research SET file_path = $1, repo = $2 WHERE project_id = $3 AND section = $4`,
+          [filePath, getRepoForModule(moduleId) === repo ? "dev-research" : "market-research", project.id, `${moduleId}--${section}`],
+        );
+      } catch (fileErr: any) {
+        log("warn", "overwatch", "file-write", `File write failed for ${moduleId}/${section} (non-blocking): ${fileErr.message}`);
+      }
+    } catch (err: any) {
+      log("error", "overwatch", "section-failed", `${moduleId}/${section} failed: ${err.message}`);
+      await pgQuery(
+        `INSERT INTO pipeline_research (project_id, section, status, findings, updated_at) VALUES ($1, $2, 'failed', $3, NOW()) ON CONFLICT (project_id, section) DO UPDATE SET status = 'failed', findings = $3, updated_at = NOW()`,
+        [project.id, `${moduleId}--${section}`, JSON.stringify({ error: err.message })],
+      );
+    }
+  }
+
+  if (moduleId === "marketing-strategy" || moduleId === "market-viability") {
+    await tryCompileMarketStrategyReport(slug, project);
+  }
+}
+
+async function advanceModule(slug: string, completedModuleId: string): Promise<void> {
+  const res = await pgQuery(`SELECT id, active_modules, module_progress, name, description, tags, project_type, stage FROM pipeline_projects WHERE slug = $1`, [slug]);
+  if (res.rowCount === 0) return;
+  const project = res.rows[0];
+  const activeModules: string[] = project.active_modules || [];
+  const moduleProgress: Record<string, string> = project.module_progress || {};
+
+  const ready = getReadyModules(activeModules, moduleProgress);
+  for (const modId of ready) {
+    const mod = MODULE_REGISTRY[modId];
+    if (!mod) continue;
+    if (mod.hitlGate) {
+      log("info", "overwatch", "hitl-gate", `Module ${mod.name} is ready but requires human approval`);
+      await mmPipelineUpdate(project.name, `Module "${mod.name}" is ready — awaiting human approval`, "info");
+      await pgQuery(
+        `UPDATE pipeline_projects SET module_progress = COALESCE(module_progress, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE slug = $2`,
+        [JSON.stringify({ [modId]: "awaiting-approval" }), slug],
+      );
+      continue;
+    }
+    await pgQuery(
+      `UPDATE pipeline_projects SET module_progress = COALESCE(module_progress, '{}'::jsonb) || $1::jsonb, updated_at = NOW() WHERE slug = $2`,
+      [JSON.stringify({ [modId]: "starting" }), slug],
+    );
+    startModuleAsync(slug, modId, project).catch((err) => log("error", "overwatch", "auto-start-failed", `Failed to auto-start ${modId}: ${err.message}`));
+  }
+
+  // Re-read module_progress for accurate stage derivation (concurrent modules may have updated it)
+  const freshRes = await pgQuery(`SELECT module_progress FROM pipeline_projects WHERE slug = $1`, [slug]);
+  const freshProgress: Record<string, string> = freshRes.rows[0]?.module_progress || {};
+  await pgQuery(`UPDATE pipeline_projects SET stage = $1, updated_at = NOW() WHERE slug = $2`, [deriveStage(activeModules, freshProgress), slug]);
+}
+
+async function tryCompileMarketStrategyReport(slug: string, project: any): Promise<void> {
+  const progress: Record<string, string> = project.module_progress || {};
+  if (progress["market-viability"] !== "completed" || progress["marketing-strategy"] !== "completed") return;
+  if (progress["report-compiler"] === "completed" || progress["report-compiler"] === "in-progress") return;
+  const activeModules: string[] = project.active_modules || [];
+  if (!activeModules.includes("report-compiler")) return;
+  log("info", "overwatch", "report-compiler", `Auto-triggering report compilation for ${slug}`);
+  startModuleAsync(slug, "report-compiler", project).catch((err) => log("error", "overwatch", "report-failed", `Report compilation failed: ${err.message}`));
+}
 // --- Sub-tools ---
 
 const tools: Record<string, {
@@ -813,7 +1712,6 @@ const tools: Record<string, {
       await triggerN8n("project-gitlab-sync", { action: "create", project });
 
       // Notify
-      await ntfyNotify(`New project: ${p.name}`, "Project Created", 3, ["rocket"]);
       await mmPipelineUpdate(p.name, "New project created", "rocket");
       await mmQueueUpdate(p.name, "added", `Priority ${priority} — ${p.description?.slice(0, 60) || "no description"}`);
 
@@ -822,11 +1720,13 @@ const tools: Record<string, {
   },
 
   list_projects: {
-    description: "List projects with optional filters. Returns summary with question counts.",
+    description: "List projects with optional filters. Returns summary with question counts. By default excludes abandoned/complete projects — pass status='abandoned' or status='complete' to see those.",
     params: {
       stage: "(optional) Filter by stage: queue|research|architecture|security_review|planning|active|completed|archived",
+      status: "(optional) Filter by status: pending|in_progress|paused|abandoned|complete. Default: excludes abandoned and complete.",
       priority: "(optional) Filter by priority (1-5)",
       tag: "(optional) Filter by tag",
+      include_all: "(optional) Set to true to include abandoned and complete projects",
       limit: "(optional) Max results, default 50",
     },
     handler: async (p) => {
@@ -839,9 +1739,14 @@ const tools: Record<string, {
       let idx = 1;
 
       if (p.stage) { sql += ` AND pp.stage = $${idx++}`; params.push(p.stage); }
+      if (p.status) {
+        sql += ` AND pp.status = $${idx++}`; params.push(p.status);
+      } else if (!p.include_all) {
+        sql += ` AND pp.status NOT IN ('abandoned', 'complete')`;
+      }
       if (p.priority) { sql += ` AND pp.priority = $${idx++}`; params.push(p.priority); }
       if (p.tag) { sql += ` AND $${idx++} = ANY(pp.tags)`; params.push(p.tag); }
-      sql += ` ORDER BY pp.priority ASC, pp.created_at DESC LIMIT $${idx++}`;
+      sql += ` ORDER BY CASE pp.status WHEN 'in_progress' THEN 1 WHEN 'pending' THEN 2 WHEN 'paused' THEN 3 WHEN 'complete' THEN 4 WHEN 'abandoned' THEN 5 END, pp.priority ASC, pp.created_at DESC LIMIT $${idx++}`;
       params.push(p.limit || 50);
 
       const result = await pgQuery(sql, params);
@@ -886,13 +1791,14 @@ const tools: Record<string, {
       estimated_cost: "(optional) Estimated cost",
       feasibility_score: "(optional) Feasibility score (1-10)",
       scope_of_work: "(optional) SOW as JSON object",
+      status: "(optional) Status: pending|in_progress|paused|abandoned|complete",
     },
     handler: async (p) => {
       const fields: string[] = [];
       const params: any[] = [];
       let idx = 1;
 
-      const updatable = ["name", "description", "priority", "tags", "estimated_hours", "estimated_cost", "feasibility_score", "scope_of_work"];
+      const updatable = ["name", "description", "priority", "tags", "estimated_hours", "estimated_cost", "feasibility_score", "scope_of_work", "status"];
       for (const field of updatable) {
         if (p[field] !== undefined) {
           const value = field === "scope_of_work" ? JSON.stringify(p[field]) : p[field];
@@ -987,6 +1893,10 @@ const tools: Record<string, {
         if (parseInt(sprints.rows[0].count) === 0) {
           throw new Error("Cannot advance to active: no sprints defined");
         }
+        // Generate project-level executive summary (non-blocking)
+        generateProjectSummary(project.slug).catch((e: any) => {
+          log("warn", "stage", "project-summary", `Project summary generation failed: ${e.message}`);
+        });
       }
 
       if (nextStage === "completed") {
@@ -1030,7 +1940,7 @@ const tools: Record<string, {
           project: result.rows[0],
         });
         if (!orchResult) {
-          await ntfyError("stage", "orchestrator", `Dev-team orchestrator FAILED to trigger for ${p.slug} → ${nextStage}`, {
+          await mmError("stage", "orchestrator", `Dev-team orchestrator FAILED to trigger for ${p.slug} → ${nextStage}`, {
             slug: p.slug, stage: nextStage,
           });
         } else {
@@ -1038,7 +1948,6 @@ const tools: Record<string, {
         }
       }
 
-      await ntfyNotify(`${project.name}: ${project.stage} → ${nextStage}`, "Stage Change", 3, ["arrow_right"]);
       await mmPipelineUpdate(project.name, `Stage: ${project.stage} \u2192 ${nextStage}`, "arrow_right");
       await mmQueueUpdate(project.name, "stage-changed", `${project.stage} \u2192 ${nextStage}`);
 
@@ -1101,12 +2010,11 @@ const tools: Record<string, {
         name: project.name,
         description: project.description,
       }).catch(async (err) => {
-        await ntfyError("research", "pipeline", `Pipeline CRASHED for ${project.slug}: ${err.message}`, {
+        await mmError("research", "pipeline", `Pipeline CRASHED for ${project.slug}: ${err.message}`, {
           slug: project.slug, error: err.message, stack: err.stack?.slice(0, 500),
         });
       });
 
-      await ntfyNotify(`Research started for: ${project.name}`, "Research Started", 3, ["mag"]);
       await mmPipelineUpdate(project.name, "Research pipeline started", "mag");
 
       return { ok: true, slug: project.slug, sections: RESEARCH_SECTIONS, message: "Dify research pipeline launched (runs in background)" };
@@ -1165,10 +2073,10 @@ const tools: Record<string, {
   },
 
   complete_research: {
-    description: "Mark research done and compile/store scope of work.",
+    description: "Mark research done, generate Fortune 500 SoW, render PDF, deliver to Mattermost.",
     params: {
       slug: "Project slug",
-      scope_of_work: "Compiled SOW as JSON object",
+      scope_of_work: "(optional) Compiled SOW as JSON object — if omitted, auto-generates via LLM",
     },
     handler: async (p) => {
       const proj = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [p.slug]);
@@ -1181,18 +2089,70 @@ const tools: Record<string, {
         [project.id]
       );
 
+      // Generate or use provided SoW
+      let sowData: any;
+      if (p.scope_of_work && typeof p.scope_of_work === "object" && Object.keys(p.scope_of_work).length > 0) {
+        sowData = p.scope_of_work;
+        log("info", "research", "complete", `Using provided SoW for ${project.slug}`);
+      } else {
+        log("info", "research", "complete", `Auto-generating SoW for ${project.slug}`);
+        sowData = await generateCompleteSow(project);
+      }
+
       // Store SOW and update timestamps
       await pgQuery(
         `UPDATE pipeline_projects SET scope_of_work = $1, research_completed_at = NOW(), updated_at = NOW() WHERE id = $2`,
-        [JSON.stringify(p.scope_of_work), project.id]
+        [JSON.stringify(sowData), project.id]
       );
+
+      // Generate and distribute SoW PDF
+      try {
+        const pdfBuffer = await renderSowPdf({
+          project_name: project.name,
+          project_slug: project.slug,
+          scope_of_work: sowData,
+          priority: project.priority,
+        });
+        const isoDate = new Date().toISOString().split("T")[0];
+        await mmDeliverablePdf(
+          { name: project.name, slug: project.slug },
+          `SoW-${project.slug}-${isoDate}`,
+          pdfBuffer,
+          `Fortune 500 Statement of Work generated for **${project.name}**`
+        );
+      } catch (pdfErr: any) {
+        log("warn", "research", "sow-pdf", `SoW PDF generation failed (non-blocking): ${pdfErr.message}`);
+      }
 
       await pgQuery(
         `INSERT INTO pipeline_events (project_id, event_type, details) VALUES ($1, $2, $3)`,
         [project.id, "research_completed", JSON.stringify({ sections_count: RESEARCH_SECTIONS.length })]
       );
 
-      await ntfyNotify(`Research complete for: ${project.name}. SOW ready.`, "Research Complete", 4, ["white_check_mark"]);
+      // Generate tech-research module summary from completed sections
+      try {
+        const researchRows = await pgQuery(
+          `SELECT section, findings, concerns, recommendations FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
+          [project.id]
+        );
+        const summaryFindings = researchRows.rows
+          .filter((r: any) => r.findings)
+          .map((r: any) => ({
+            section: r.section,
+            content: findingsToMarkdown(
+              r.section,
+              r.findings,
+              r.concerns || [],
+              r.recommendations || [],
+            ),
+          }));
+        if (summaryFindings.length > 0) {
+          await generateModuleSummary(project.slug, "tech-research", summaryFindings);
+        }
+      } catch (sumErr: any) {
+        log("warn", "research", "complete-summary", `Summary generation failed (non-blocking): ${sumErr.message}`);
+      }
+
       await mmPipelineUpdate(project.name, "Research pipeline complete. SOW ready.", "white_check_mark");
 
       return { ok: true, slug: p.slug, message: "Research completed and SOW stored" };
@@ -1221,7 +2181,7 @@ const tools: Record<string, {
 
       const priorityTag = p.priority === "blocking" ? "exclamation" : "question";
       const priorityLevel = p.priority === "blocking" ? 4 : 3;
-      await ntfyNotify(
+      await mmNotify(
         `[${proj.rows[0].name}] ${p.question}`,
         `${(p.priority || "normal").toUpperCase()} Question`,
         priorityLevel,
@@ -1405,7 +2365,7 @@ const tools: Record<string, {
         [proj.rows[0].id, "sprint_started", JSON.stringify({ sprint_number: p.sprint_number, name: result.rows[0].name })]
       );
 
-      await ntfyNotify(`Sprint ${p.sprint_number} started: ${result.rows[0].name}`, `${proj.rows[0].name}`, 3, ["runner"]);
+      await mmNotify(`Sprint ${p.sprint_number} started: ${result.rows[0].name}`, `${proj.rows[0].name}`, 3, ["runner"]);
       return result.rows[0];
     },
   },
@@ -1445,7 +2405,7 @@ const tools: Record<string, {
         [proj.rows[0].id, "sprint_completed", JSON.stringify({ sprint_number: p.sprint_number, actual_hours: result.rows[0].actual_hours })]
       );
 
-      await ntfyNotify(`Sprint ${p.sprint_number} complete!`, `${proj.rows[0].name}`, 3, ["checkered_flag"]);
+      await mmNotify(`Sprint ${p.sprint_number} complete!`, `${proj.rows[0].name}`, 3, ["checkered_flag"]);
       return result.rows[0];
     },
   },
@@ -1574,7 +2534,7 @@ const tools: Record<string, {
             job.status = "failed";
             job.error = data?.error || "unknown error";
             job.completed_at = new Date().toISOString();
-            await ntfyError("devteam", p.workflow, `Async job ${jobId} failed: ${job.error}`, { workflow: p.workflow });
+            await mmError("devteam", p.workflow, `Async job ${jobId} failed: ${job.error}`, { workflow: p.workflow });
           } else {
             job.status = "succeeded";
             job.result = data.outputs?.result || data.outputs;
@@ -1585,15 +2545,15 @@ const tools: Record<string, {
             // Post deliverable to Mattermost
             const resultText = typeof job.result === "string" ? job.result : JSON.stringify(job.result, null, 2);
             const contentType = ["focused-research", "pm-generate-sow"].includes(p.workflow) ? (p.workflow === "pm-generate-sow" ? "sow" : "research") : "other";
-            await mmDeliverable(p.inputs?.project_name || p.workflow, `${p.workflow} (job ${jobId})`, resultText, contentType);
-            await mmPipelineUpdate(p.inputs?.project_name || p.workflow, `${p.workflow} completed (${data.elapsed_time?.toFixed(1)}s, ${data.total_tokens} tokens)`, "white_check_mark");
+            await mmDeliverable(p.inputs?.project_slug ? { name: p.inputs.project_name || p.workflow, slug: p.inputs.project_slug } : (p.inputs?.project_name || p.workflow), `${p.workflow} (job ${jobId})`, resultText, contentType);
+            // Completion logged silently — no per-workflow ping
 
           }
         }).catch(async (e: any) => {
           job.status = "failed";
           job.error = e.message;
           job.completed_at = new Date().toISOString();
-          await ntfyError("devteam", p.workflow, `Async job ${jobId} error: ${e.message}`, { workflow: p.workflow });
+          await mmError("devteam", p.workflow, `Async job ${jobId} error: ${e.message}`, { workflow: p.workflow });
         });
 
         return { job_id: jobId, workflow: p.workflow, status: "running", message: "Workflow started in background. Poll with get_devteam_result." };
@@ -1604,7 +2564,7 @@ const tools: Record<string, {
       const data = difyResponse?.data;
       if (!data || data.status !== "succeeded") {
         const errMsg = `Dify workflow ${p.workflow} failed: ${data?.error || "unknown error"}`;
-        await ntfyError("devteam", p.workflow, errMsg, {
+        await mmError("devteam", p.workflow, errMsg, {
           workflow: p.workflow, status: data?.status, error: data?.error,
         });
         throw new Error(errMsg);
@@ -1618,9 +2578,9 @@ const tools: Record<string, {
       if (["focused-research", "pm-generate-sow"].includes(p.workflow)) {
         const resultText = typeof outputResult === "string" ? outputResult : JSON.stringify(outputResult, null, 2);
         const cType = p.workflow === "pm-generate-sow" ? "sow" : "research";
-        await mmDeliverable(p.inputs?.project_name || p.workflow, p.workflow, resultText, cType);
+        await mmDeliverable(p.inputs?.project_slug ? { name: p.inputs.project_name || p.workflow, slug: p.inputs.project_slug } : (p.inputs?.project_name || p.workflow), p.workflow, resultText, cType);
       }
-      await mmPipelineUpdate(p.inputs?.project_name || p.workflow, `${p.workflow} completed (${data.elapsed_time?.toFixed(1)}s, ${data.total_tokens} tokens)`, "white_check_mark");
+      // Completion logged silently — no per-workflow ping
       return {
         workflow: p.workflow,
         result: data.outputs?.result || data.outputs,
@@ -1724,7 +2684,7 @@ const tools: Record<string, {
       // Fire-and-forget execution (runs in background)
       runSprintExecution(project, parseInt(p.sprint_number), p.feedback || undefined).catch(async (err) => {
         log("error", "run_sprint", "execute", `Sprint execution failed: ${err.message}`);
-        await ntfyError("run_sprint", "execute", `Sprint ${p.sprint_number} failed for ${p.slug}: ${err.message}`, {});
+        await mmError("run_sprint", "execute", `Sprint ${p.sprint_number} failed for ${p.slug}: ${err.message}`, {});
       });
 
       return {
@@ -1888,7 +2848,7 @@ const tools: Record<string, {
         [JSON.stringify({ mm_post_id: mmPostId, review_type: p.review_type, title: p.title, slug: p.slug }), taskId]
       );
 
-      await mmDeliverable(proj.rows[0].name, p.title, p.content, p.review_type);
+      await mmDeliverable({ name: proj.rows[0].name, slug: p.slug }, p.title, p.content, p.review_type);
       log("info", "review", "submit", `Review submitted: task ${taskId} for ${p.slug}`, { review_type: p.review_type, title: p.title });
       await mmPipelineUpdate(proj.rows[0].name, `Review submitted: ${p.title} (task #${taskId})`, "eyes");
       await mmTodo(`Review: ${p.title} — \`/pipeline approve ${taskId}\``, proj.rows[0].name, "action-needed");
@@ -1961,6 +2921,172 @@ const tools: Record<string, {
       };
     },
   },
+
+  // ── Overwatch Module Tools ────────────────────────────────────────────────
+
+  classify_project: {
+    description: "Classify a project using Overwatch AI. Determines project_type, revenue_model, deliverable_type, and recommended modules.",
+    params: { slug: "Project slug" },
+    handler: async (p: Record<string, any>) => {
+      const slug = p.slug;
+      if (!slug) throw new Error("slug is required");
+      const res = await pgQuery(`SELECT id, name, description, tags, project_type FROM pipeline_projects WHERE slug = $1`, [slug]);
+      if (res.rowCount === 0) throw new Error(`Project not found: ${slug}`);
+      const project = res.rows[0];
+      if (project.overwatch_classification && project.overwatch_approved) return { status: "already_classified", project_type: project.project_type, message: "Project already classified and approved. Use start_module to manage modules." };
+
+      let classification: any;
+      if (DIFY_OVERWATCH_KEY) {
+        try {
+          const moduleDescriptions = Object.entries(MODULE_REGISTRY).map(([id, m]) => `${id}: ${m.name} (sections: ${m.sections.join(", ")})`).join("\n");
+          const result = await callDify(DIFY_OVERWATCH_KEY, { project_name: project.name, project_description: project.description || "", tags: JSON.stringify(project.tags || []), module_descriptions: moduleDescriptions }, "overwatch-classify");
+          // Extract classification from Dify response
+          const raw = typeof result === "string" ? result : (result?.data?.outputs?.result || result?.outputs?.result || JSON.stringify(result));
+          const rawStr = typeof raw === "string" ? raw : JSON.stringify(raw);
+          // Parse JSON from markdown code block if present
+          const bt = String.fromCharCode(96);
+          const startMarker = bt.repeat(3) + "json" + String.fromCharCode(10);
+          const endMarker = String.fromCharCode(10) + bt.repeat(3);
+          const startIdx = rawStr.indexOf(startMarker);
+          let jsonStr = rawStr;
+          if (startIdx !== -1) {
+            const afterStart = startIdx + startMarker.length;
+            const endIdx = rawStr.indexOf(endMarker, afterStart);
+            if (endIdx !== -1) jsonStr = rawStr.substring(afterStart, endIdx);
+          }
+          classification = JSON.parse(jsonStr);
+          // Normalize field names
+          if (classification.active_modules && !classification.recommended_modules) {
+            classification.recommended_modules = classification.active_modules;
+          }
+        } catch (err: any) {
+          log("warn", "overwatch", "classify-fallback", `Dify classification failed, using heuristic: ${err.message}`);
+        }
+      }
+
+      if (!classification) {
+        const desc = (project.description || "").toLowerCase();
+        const tags = (project.tags || []).map((t: string) => t.toLowerCase());
+        const allText = `${desc} ${tags.join(" ")}`;
+        let projectType = "personal-tool";
+        if (allText.match(/market|sell|revenue|monetiz|saas|subscription|pricing/)) projectType = "market-product";
+        else if (allText.match(/client|contract|freelance|agency|deliver/)) projectType = "client-work";
+        else if (allText.match(/automat|workflow|pipeline|n8n|integrat|bot/)) projectType = "automation";
+        else if (allText.match(/hybrid|platform|marketplace/)) projectType = "hybrid";
+        let revenueModel = "none";
+        if (projectType === "market-product") {
+          if (allText.match(/subscri|saas|monthly|annual/)) revenueModel = "subscription";
+          else if (allText.match(/one.?time|license|purchase/)) revenueModel = "one-time";
+          else if (allText.match(/free|open.?source|oss/)) revenueModel = "freemium";
+          else revenueModel = "tbd";
+        }
+        const baseModules = applyCoercionRules(projectType, ["tech-research", "architecture", "security-review", "sprint-planning"]);
+        classification = { project_type: projectType, revenue_model: revenueModel, deliverable_type: projectType === "automation" ? "workflow" : "application", recommended_modules: baseModules, confidence_score: 0.6, reasoning: "Heuristic classification based on project description and tags" };
+      }
+
+      await pgQuery(`UPDATE pipeline_projects SET overwatch_classification = $1, updated_at = NOW() WHERE slug = $2`, [JSON.stringify(classification), slug]);
+      await mmPipelineUpdate(project.name, `Overwatch classified as "${classification.project_type}" with ${(classification.recommended_modules || []).length} modules. Awaiting approval.`, "info");
+      return { status: "classified", slug, classification, next_step: "Call approve_classification to confirm or override" };
+    },
+  },
+
+  approve_classification: {
+    description: "Approve (or override) an Overwatch classification. Activates modules and starts the pipeline.",
+    params: { slug: "Project slug", override_type: "(optional) Override project_type", override_modules: "(optional) JSON array of module IDs", override_revenue: "(optional) Override revenue_model" },
+    handler: async (p: Record<string, any>) => {
+      const slug = p.slug;
+      if (!slug) throw new Error("slug is required");
+      const res = await pgQuery(`SELECT id, name, description, tags, overwatch_classification, overwatch_approved, active_modules, module_progress, project_type, stage FROM pipeline_projects WHERE slug = $1`, [slug]);
+      if (res.rowCount === 0) throw new Error(`Project not found: ${slug}`);
+      const project = res.rows[0];
+      if (project.overwatch_approved) return { status: "already_approved", message: "Classification already approved. Use start_module to manually start additional modules." };
+      const classification = project.overwatch_classification;
+      if (!classification) return { status: "not_classified", message: "Run classify_project first." };
+
+      const projectType = p.override_type || classification.project_type;
+      const revenueModel = p.override_revenue || classification.revenue_model;
+      const deliverableType = classification.deliverable_type;
+      let modules: string[];
+      if (p.override_modules) { modules = typeof p.override_modules === "string" ? JSON.parse(p.override_modules) : p.override_modules; }
+      else { modules = classification.recommended_modules || []; }
+      modules = applyCoercionRules(projectType, modules);
+
+      const moduleProgress: Record<string, string> = {};
+      for (const modId of modules) moduleProgress[modId] = "pending";
+
+      await pgQuery(`UPDATE pipeline_projects SET project_type = $1, revenue_model = $2, deliverable_type = $3, active_modules = $4, module_progress = $5, overwatch_approved = true, stage = 'research', updated_at = NOW() WHERE slug = $6`,
+        [projectType, revenueModel, deliverableType, JSON.stringify(modules), JSON.stringify(moduleProgress), slug]);
+
+      const updated = (await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [slug])).rows[0];
+      await mmPipelineUpdate(project.name, `Classification approved: ${projectType} with ${modules.length} modules. Starting pipeline.`, "success");
+
+      const ready = getReadyModules(modules, moduleProgress);
+      const started: string[] = [];
+      for (const modId of ready) {
+        const mod = MODULE_REGISTRY[modId];
+        if (!mod) continue;
+        if (mod.hitlGate) { moduleProgress[modId] = "awaiting-approval"; continue; }
+        moduleProgress[modId] = "starting";
+        started.push(modId);
+        startModuleAsync(slug, modId, updated).catch((err) => log("error", "overwatch", "start-failed", `Failed to start ${modId}: ${err.message}`));
+      }
+      await pgQuery(`UPDATE pipeline_projects SET module_progress = $1, updated_at = NOW() WHERE slug = $2`, [JSON.stringify(moduleProgress), slug]);
+      return { status: "approved", project_type: projectType, revenue_model: revenueModel, active_modules: modules, auto_started: started, awaiting_approval: Object.entries(moduleProgress).filter(([, s]) => s === "awaiting-approval").map(([k]) => k) };
+    },
+  },
+
+  start_module: {
+    description: "Manually start a module (for HitL-gated or re-invocable modules).",
+    params: { slug: "Project slug", module_id: "Module ID to start" },
+    handler: async (p: Record<string, any>) => {
+      const { slug, module_id } = p;
+      if (!slug || !module_id) throw new Error("slug and module_id are required");
+      const mod = MODULE_REGISTRY[module_id];
+      if (!mod) throw new Error(`Unknown module: ${module_id}. Available: ${Object.keys(MODULE_REGISTRY).join(", ")}`);
+      const res = await pgQuery(`SELECT * FROM pipeline_projects WHERE slug = $1`, [slug]);
+      if (res.rowCount === 0) throw new Error(`Project not found: ${slug}`);
+      const project = res.rows[0];
+      const activeModules: string[] = project.active_modules || [];
+      const moduleProgress: Record<string, string> = project.module_progress || {};
+      if (!activeModules.includes(module_id)) return { status: "error", message: `Module ${module_id} is not in active_modules for this project` };
+      const currentStatus = moduleProgress[module_id];
+      if (currentStatus === "in-progress" || currentStatus === "starting") return { status: "error", message: `Module ${module_id} is already running` };
+      if (currentStatus === "completed" && !mod.reInvocable) return { status: "error", message: `Module ${module_id} is completed and not re-invocable` };
+      const depsOk = mod.dependsOn.every((dep) => moduleProgress[dep] === "completed");
+      if (!depsOk) { const missing = mod.dependsOn.filter((dep) => moduleProgress[dep] !== "completed"); return { status: "blocked", message: `Dependencies not met: ${missing.join(", ")}` }; }
+
+      moduleProgress[module_id] = "starting";
+      await pgQuery(`UPDATE pipeline_projects SET module_progress = $1, updated_at = NOW() WHERE slug = $2`, [JSON.stringify(moduleProgress), slug]);
+      startModuleAsync(slug, module_id, project).catch((err) => log("error", "overwatch", "manual-start-failed", `Failed to start ${module_id}: ${err.message}`));
+      return { status: "started", module: module_id, name: mod.name, message: `Module ${mod.name} starting in background` };
+    },
+  },
+
+  get_module_status: {
+    description: "Get the full Overwatch module pipeline status for a project.",
+    params: { slug: "Project slug" },
+    handler: async (p: Record<string, any>) => {
+      const slug = p.slug;
+      if (!slug) throw new Error("slug is required");
+      const res = await pgQuery(`SELECT id, name, slug, project_type, revenue_model, stage, active_modules, module_progress, overwatch_classification, overwatch_approved FROM pipeline_projects WHERE slug = $1`, [slug]);
+      if (res.rowCount === 0) throw new Error(`Project not found: ${slug}`);
+      const project = res.rows[0];
+      const activeModules: string[] = project.active_modules || [];
+      const moduleProgress: Record<string, string> = project.module_progress || {};
+      const runsRes = await pgQuery(`SELECT module_id, status, started_at, completed_at, error FROM pipeline_module_runs WHERE project_id = $1 ORDER BY started_at`, [project.id]);
+      const modules = activeModules.map((modId) => {
+        const mod = MODULE_REGISTRY[modId];
+        const run = runsRes.rows.find((r: any) => r.module_id === modId);
+        return { id: modId, name: mod?.name || modId, status: moduleProgress[modId] || "unknown", sections: mod?.sections || [], depends_on: mod?.dependsOn || [], hitl_gate: mod?.hitlGate || false, re_invocable: mod?.reInvocable || false, started_at: run?.started_at, completed_at: run?.completed_at, error: run?.error };
+      });
+      const ready = getReadyModules(activeModules, moduleProgress);
+      return {
+        slug, project_type: project.project_type, stage: project.stage, overwatch_approved: project.overwatch_approved, modules,
+        summary: { total: activeModules.length, completed: Object.values(moduleProgress).filter((s) => s === "completed").length, in_progress: Object.values(moduleProgress).filter((s) => s === "in-progress" || s === "starting").length, pending: Object.values(moduleProgress).filter((s) => s === "pending").length, failed: Object.values(moduleProgress).filter((s) => s === "failed").length, awaiting_approval: Object.values(moduleProgress).filter((s) => s === "awaiting-approval").length },
+        ready_to_start: ready,
+      };
+    },
+  },
 };
 
 // --- Registration ---
@@ -1972,7 +3098,8 @@ export function registerProjectTools(server: McpServer) {
     "research (13 sections), architecture, security review, planning, building, and completion. Tools cover: " +
     "project CRUD (create/list/get/update/advance/archive), research (start/get/update/complete), " +
     "agent tasks (create/list/update/run_devteam_workflow), human-in-the-loop reviews (submit_for_review/check_review/list_pending_reviews), async questions (add/answer/get_unanswered/get), " +
-    "sprints (add/update/start/complete), artifacts (add/list), and tracking (log_event/get_metrics/get_timeline).",
+    "sprints (add/update/start/complete), artifacts (add/list), tracking (log_event/get_metrics/get_timeline), " +
+    "and Overwatch modules (classify_project/approve_classification/start_module/get_module_status).",
     {},
     async () => {
       const toolList = Object.entries(tools).map(([name, def]) => ({
@@ -2005,7 +3132,7 @@ export function registerProjectTools(server: McpServer) {
         // Send notification for unexpected errors in critical tools
         const criticalTools = ["advance_stage", "start_research", "run_devteam_workflow", "create_agent_task"];
         if (criticalTools.includes(tool)) {
-          await ntfyError("call", tool, `Tool ${tool} failed: ${error.message}`, {
+          await mmError("call", tool, `Tool ${tool} failed: ${error.message}`, {
             tool, params: Object.keys(params || {}),
           });
         }
@@ -2223,7 +3350,7 @@ export async function handleReviewAction(
         // Fire-and-forget re-run
         runSprintExecution(projData, sprint.sprint_number, feedbackMsg).catch(async (err) => {
           log("error", "review", "retry", `Retry failed for sprint ${sprint.sprint_number}: ${err.message}`);
-          await ntfyError("review", "retry", `Sprint retry failed: ${err.message}`, { slug: existingResult.slug });
+          await mmError("review", "retry", `Sprint retry failed: ${err.message}`, { slug: existingResult.slug });
         });
 
         await mmPipelineUpdate(task.project_name, `Retrying sprint ${sprint.sprint_number} with feedback from review`, "arrows_counterclockwise");

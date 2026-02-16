@@ -280,3 +280,4 @@ export function registerRedisTools(server: McpServer) {
     }
   );
 }
+

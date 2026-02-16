@@ -21,6 +21,9 @@ COPY . .
 # Build TypeScript
 RUN npm run build
 
+# Copy non-TS assets to dist
+RUN cp -r src/templates dist/templates
+
 # Expose port
 EXPOSE 3500
 

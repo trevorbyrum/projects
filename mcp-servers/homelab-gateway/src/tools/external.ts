@@ -54,7 +54,7 @@ async function getClient(name: string, server: ExternalServer): Promise<Client> 
 
   await client.connect(transport);
   clients.set(name, client);
-
+  
   return client;
 }
 
@@ -83,7 +83,7 @@ async function callTool(name: string, server: ExternalServer, toolName: string, 
 
 export function registerExternalTools(mcpServer: McpServer) {
   const config = loadConfig();
-
+  
   for (const [name, server] of Object.entries(config.servers)) {
     if (!server.enabled) {
       console.log(`External MCP '${name}' is disabled, skipping`);
@@ -105,19 +105,19 @@ export function registerExternalTools(mcpServer: McpServer) {
             description: t.description,
             params: t.inputSchema?.properties || {},
           }));
-          return {
-            content: [{
-              type: "text",
+          return { 
+            content: [{ 
+              type: "text", 
               text: JSON.stringify({
                 server: name,
                 description: server.description,
                 url: server.url,
                 tools: toolList,
-              }, null, 2)
-            }]
+              }, null, 2) 
+            }] 
           };
         } catch (err: any) {
-          return {
+          return { 
             content: [{ type: "text", text: JSON.stringify({ error: err.message }) }],
             isError: true,
           };
@@ -136,17 +136,17 @@ export function registerExternalTools(mcpServer: McpServer) {
       async ({ tool, params }) => {
         try {
           const result = await callTool(name, server, tool, params || {});
-
+          
           // Pass through the content from the external MCP
           if (result.content) {
             return { content: result.content };
           }
-
-          return {
-            content: [{ type: "text", text: JSON.stringify(result, null, 2) }]
+          
+          return { 
+            content: [{ type: "text", text: JSON.stringify(result, null, 2) }] 
           };
         } catch (err: any) {
-          return {
+          return { 
             content: [{ type: "text", text: JSON.stringify({ error: err.message }) }],
             isError: true,
           };

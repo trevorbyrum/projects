@@ -1,0 +1,403 @@
+/* Navy & Gold — Fortune 500 consulting firm styling */
+@page {
+  size: A4;
+  margin: 22mm 20mm 26mm 20mm;
+  @bottom-left {
+    content: "Confidential";
+    font-size: 8px;
+    color: #999;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  }
+  @bottom-center {
+    content: "Homelab";
+    font-size: 8px;
+    color: #999;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+  }
+  @bottom-right {
+    content: "Page " counter(page) " of " counter(pages);
+    font-size: 8px;
+    color: #999;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  }
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  font-size: 10.5pt;
+  line-height: 1.55;
+  color: #2d2d2d;
+  background: #ffffff;
+}
+
+/* ── Cover Page ──────────────────────────── */
+.cover {
+  page-break-after: always;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 92vh;
+  padding: 0;
+}
+
+.cover-header {
+  background: #0c2340;
+  color: white;
+  padding: 64px 48px 56px;
+  border-bottom: 4px solid #c49a2a;
+}
+
+.cover-header h1 {
+  font-size: 30pt;
+  font-weight: 300;
+  letter-spacing: -0.3px;
+  margin-bottom: 6px;
+  color: #ffffff;
+}
+
+.cover-header .subtitle {
+  font-size: 13pt;
+  font-weight: 400;
+  color: #c49a2a;
+  text-transform: uppercase;
+  letter-spacing: 3px;
+}
+
+.cover-meta {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0;
+  margin-top: 0;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.cover-meta-item {
+  padding: 22px 32px;
+  border-right: 1px solid #e0e0e0;
+  background: #fafafa;
+}
+
+.cover-meta-item:last-child {
+  border-right: none;
+}
+
+.cover-meta-item:nth-child(n+4) {
+  border-top: 1px solid #e0e0e0;
+}
+
+.cover-meta-item .label {
+  font-size: 7.5pt;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: #888;
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+
+.cover-meta-item .value {
+  font-size: 14pt;
+  font-weight: 600;
+  color: #0c2340;
+}
+
+.cover-footer {
+  padding: 16px 48px;
+  background: #fafafa;
+  border-top: 1px solid #e0e0e0;
+  font-size: 9pt;
+  color: #666;
+  text-align: right;
+}
+
+/* ── Table of Contents ───────────────────── */
+.toc {
+  page-break-after: always;
+  padding: 48px 0;
+}
+
+.toc h2 {
+  font-size: 18pt;
+  font-weight: 300;
+  color: #0c2340;
+  margin-bottom: 24px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid #0c2340;
+}
+
+.toc-entry {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f0f0;
+  font-size: 10.5pt;
+}
+
+.toc-entry .toc-num {
+  font-weight: 600;
+  color: #0c2340;
+  margin-right: 12px;
+  min-width: 24px;
+}
+
+.toc-entry .toc-title { flex: 1; color: #444; }
+
+/* ── Section Headings ────────────────────── */
+h2.section-title {
+  font-size: 15pt;
+  font-weight: 300;
+  color: #0c2340;
+  border-bottom: 1px solid #0c2340;
+  padding-bottom: 6px;
+  margin: 32px 0 14px 0;
+  page-break-after: avoid;
+}
+
+h2.section-title .section-num {
+  font-weight: 600;
+  color: #0c2340;
+  margin-right: 6px;
+}
+
+h3 {
+  font-size: 11pt;
+  color: #0c2340;
+  margin: 20px 0 8px 0;
+  page-break-after: avoid;
+  font-weight: 600;
+}
+
+/* ── Content ─────────────────────────────── */
+p { margin-bottom: 8px; color: #333; }
+p.exec-summary { margin-bottom: 12px; font-size: 11pt; line-height: 1.65; color: #222; }
+ul, ol { margin: 6px 0 12px 22px; page-break-inside: avoid; }
+li { margin-bottom: 3px; color: #333; }
+strong { color: #1a1a1a; }
+code { background: #f5f5f5; padding: 1px 4px; border-radius: 2px; font-size: 9.5pt; color: #555; }
+
+/* ── Tables ──────────────────────────────── */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0 18px 0;
+  font-size: 9.5pt;
+  page-break-inside: avoid;
+}
+
+thead {
+  background: #0c2340;
+}
+
+th {
+  padding: 9px 12px;
+  text-align: left;
+  font-weight: 500;
+  font-size: 8.5pt;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #ffffff;
+}
+
+td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #e8e8e8;
+  color: #444;
+}
+
+tbody tr:nth-child(even) {
+  background: #f9f9f9;
+}
+
+/* ── Scope Section ───────────────────────── */
+.scope-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  margin: 10px 0 18px 0;
+}
+
+.scope-col {
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.scope-heading {
+  padding: 10px 16px;
+  font-size: 10pt;
+  margin: 0;
+}
+
+.scope-heading-in {
+  background: #e8f5e9;
+  color: #2e7d32;
+  border-bottom: 2px solid #66bb6a;
+}
+
+.scope-heading-out {
+  background: #fce4ec;
+  color: #c62828;
+  border-bottom: 2px solid #ef5350;
+}
+
+.scope-list {
+  list-style: none;
+  margin: 0;
+  padding: 12px 16px;
+}
+
+.scope-list li {
+  padding: 4px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.scope-list li:last-child {
+  border-bottom: none;
+}
+
+.scope-icon {
+  display: inline-block;
+  width: 18px;
+  font-weight: 700;
+  margin-right: 6px;
+}
+
+.scope-in { color: #2e7d32; }
+.scope-out { color: #c62828; }
+
+/* ── Sprint Cards ────────────────────────── */
+.sprint-summary-table {
+  margin-bottom: 20px;
+}
+
+.sprint-card {
+  border: 1px solid #e0e0e0;
+  border-radius: 0;
+  margin-bottom: 14px;
+  page-break-inside: avoid;
+  overflow: hidden;
+}
+
+.sprint-card-header {
+  background: #f5f5f5;
+  padding: 10px 16px;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.sprint-card-header h3 {
+  margin: 0;
+  font-size: 10pt;
+  color: #0c2340;
+  font-weight: 600;
+}
+
+.sprint-card-body { padding: 12px 16px; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 2px;
+  font-size: 7.5pt;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.badge-low { background: #e8f5e9; color: #2e7d32; }
+.badge-medium { background: #fff3e0; color: #e65100; }
+.badge-high { background: #fce4ec; color: #c62828; }
+.badge-extreme { background: #f3e5f5; color: #6a1b9a; }
+
+/* ── Risk Table ──────────────────────────── */
+.risk-critical { color: #b71c1c; font-weight: 700; text-transform: uppercase; }
+.risk-high { color: #c62828; font-weight: 600; }
+.risk-medium { color: #e65100; font-weight: 600; }
+.risk-low { color: #2e7d32; font-weight: 600; }
+
+/* ── Level of Effort ─────────────────────── */
+.loe-stats-card {
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 10px 0 18px 0;
+  page-break-inside: avoid;
+}
+
+.loe-stats-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0;
+  background: #fafafa;
+}
+
+.loe-stat {
+  text-align: center;
+  padding: 20px 16px;
+  border-right: 1px solid #e0e0e0;
+}
+
+.loe-stat:last-child {
+  border-right: none;
+}
+
+.loe-stat-value {
+  font-size: 22pt;
+  font-weight: 700;
+  color: #0c2340;
+  line-height: 1.2;
+}
+
+.loe-stat-label {
+  font-size: 8pt;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: #888;
+  margin-top: 4px;
+}
+
+.loe-distribution {
+  padding: 16px 20px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.loe-distribution h3 {
+  margin: 0 0 10px 0;
+  font-size: 9pt;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: #666;
+}
+
+.loe-dist-grid {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.loe-dist-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.loe-dist-count {
+  font-size: 9.5pt;
+  color: #444;
+}
+
+/* ── Footer ──────────────────────────────── */
+.doc-footer {
+  margin-top: 36px;
+  padding-top: 12px;
+  border-top: 1px solid #e0e0e0;
+  font-size: 7.5pt;
+  color: #aaa;
+  text-align: center;
+  letter-spacing: 0.3px;
+}

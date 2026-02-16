@@ -314,7 +314,7 @@ export function registerOpenhandsTools(server: McpServer) {
   server.tool(
     "openhands_list",
     "List all available OpenHands AI coding agent tools. OpenHands is a self-hosted autonomous " +
-    "coding agent. Tools cover: conversation/session management (create, list, " +
+    "coding agent at Tower:3001. Tools cover: conversation/session management (create, list, " +
     "start/stop agent), messaging (send tasks, view events), runtime info (VS Code URL, " +
     "web hosts), settings (LLM config), secrets management, and git provider integration. " +
     "Use create_conversation to start a new coding task, then start_conversation to run the agent.",
@@ -351,3 +351,4 @@ export function registerOpenhandsTools(server: McpServer) {
     }
   );
 }
+

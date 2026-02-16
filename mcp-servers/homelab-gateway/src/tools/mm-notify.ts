@@ -4,21 +4,26 @@
  * Import into any module that needs to send Mattermost notifications.
  */
 
+import { ensureTodoSchema } from "./mm-slash.js";
+import { pgQuery } from "../utils/postgres.js";
+import { ncUploadFile, ncEnsureFolder, ncPublicUrl } from "./nextcloud.js";
+import { uploadPdfToMattermost } from "./pdf-renderer.js";
+
 const MM_URL = process.env.MATTERMOST_URL || "http://mattermost:8065";
 const MM_BOT_TOKEN = process.env.MATTERMOST_BOT_TOKEN || "";
 
-// Channel IDs — mapped by purpose
-export const MM_CHANNELS = {
-  "pipeline-updates": "your-channel-id-pipeline-updates",
-  "human-review": "your-channel-id-human-review",
-  "alerts": "your-channel-id-alerts",
-  "dev-logs": "your-channel-id-dev-logs",
-  "deliverables": "your-channel-id-deliverables",
-  "to-do": "your-channel-id-to-do",
-  "queue": "your-channel-id-queue",
-} as const;
+// Channel IDs — loaded from environment variables
+export const MM_CHANNELS: Record<string, string> = {
+  "pipeline-updates": process.env.MM_CHANNEL_PIPELINE_UPDATES || "",
+  "human-review": process.env.MM_CHANNEL_HUMAN_REVIEW || "",
+  "alerts": process.env.MM_CHANNEL_ALERTS || "",
+  "dev-logs": process.env.MM_CHANNEL_DEV_LOGS || "",
+  "deliverables": process.env.MM_CHANNEL_DELIVERABLES || "",
+  "to-do": process.env.MM_CHANNEL_TODO || "",
+  "queue": process.env.MM_CHANNEL_QUEUE || "",
+};
 
-export type MMChannel = keyof typeof MM_CHANNELS;
+export type MMChannel = "pipeline-updates" | "human-review" | "alerts" | "dev-logs" | "deliverables" | "to-do" | "queue";
 
 /**
  * Post a message to a Mattermost channel via the bot.
@@ -66,18 +71,79 @@ export async function mmPipelineUpdate(project: string, message: string, emoji?:
 
 /**
  * Post a deliverable (SoW, research output, etc.) to the deliverables channel.
- * Supports long content with optional collapse.
+ * Uploads to Nextcloud when a project slug is provided.
  */
-export async function mmDeliverable(project: string, title: string, content: string, contentType?: "sow" | "research" | "other"): Promise<void> {
+export async function mmDeliverable(
+  project: string | { name: string; slug: string },
+  title: string,
+  content: string,
+  contentType?: "sow" | "research" | "other"
+): Promise<void> {
+  const projectName = typeof project === "string" ? project : project.name;
+  const slug = typeof project === "object" ? project.slug : null;
   const typeLabel = contentType === "sow" ? ":page_facing_up: Scope of Work"
     : contentType === "research" ? ":mag: Research Results"
       : ":package: Deliverable";
+
+  // Upload to Nextcloud when slug is available
+  let ncLink = "";
+  if (slug) {
+    const folderPath = `/Deliverables/${slug}`;
+    const safeName = title.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 80);
+    const isoDate = new Date().toISOString().split("T")[0];
+    const filename = `${safeName}-${isoDate}.md`;
+    const ok = await ncEnsureFolder(folderPath);
+    if (ok) {
+      const result = await ncUploadFile(`${folderPath}/${filename}`, content, "text/markdown");
+      if (result.success) {
+        ncLink = `\n:file_folder: [View in Nextcloud](${ncPublicUrl(folderPath)})`;
+      } else {
+        console.error(`[mm-notify] Nextcloud upload failed: ${result.error}`);
+      }
+    }
+  }
+
   // Mattermost max post size is ~16383 chars. Truncate if needed.
   const maxContent = 14000;
   const truncated = content.length > maxContent
-    ? content.slice(0, maxContent) + "\n\n---\n*[Truncated — full content stored in project artifacts]*"
+    ? content.slice(0, maxContent) + "\n\n---\n*[Truncated \u2014 full content stored in Nextcloud]*"
     : content;
-  await mmPost("deliverables", `### ${typeLabel}: ${title}\n**Project:** ${project}\n\n${truncated}`);
+  await mmPost("deliverables", `### ${typeLabel}: ${title}\n**Project:** ${projectName}${ncLink}\n\n${truncated}`);
+}
+
+/**
+ * Upload a PDF to Nextcloud and post to Mattermost #deliverables with file attachment.
+ */
+export async function mmDeliverablePdf(
+  project: { name: string; slug: string },
+  title: string,
+  pdfBuffer: Buffer,
+  message?: string
+): Promise<void> {
+  const folderPath = `/Deliverables/${project.slug}`;
+  const filename = `${title}.pdf`;
+  let ncLink = "";
+
+  // Upload to Nextcloud
+  const ok = await ncEnsureFolder(folderPath);
+  if (ok) {
+    const result = await ncUploadFile(`${folderPath}/${filename}`, pdfBuffer, "application/pdf");
+    if (result.success) {
+      ncLink = ` | [View in Nextcloud](${ncPublicUrl(folderPath)})`;
+    } else {
+      console.error(`[mm-notify] Nextcloud PDF upload failed: ${result.error}`);
+    }
+  }
+
+  // Post to Mattermost with file attachment
+  const channelId = MM_CHANNELS["deliverables"];
+  const msg = (message || `PDF deliverable: **${title}**`) +
+    `\n**Project:** ${project.name}${ncLink}`;
+  if (channelId) {
+    await uploadPdfToMattermost(channelId, filename, pdfBuffer, msg);
+  } else {
+    await mmPost("deliverables", msg);
+  }
 }
 
 /**
@@ -139,11 +205,12 @@ export async function mmUpdatePost(postId: string, message: string): Promise<voi
  * Post a message to a specific Mattermost channel by ID (not by name).
  * Used by war-room for dynamically created channels.
  */
-export async function mmPostToChannel(channelId: string, message: string, rootId?: string): Promise<any | null> {
+export async function mmPostToChannel(channelId: string, message: string, rootId?: string, props?: Record<string, any>): Promise<any | null> {
   if (!MM_BOT_TOKEN) return null;
   try {
     const body: any = { channel_id: channelId, message };
     if (rootId) body.root_id = rootId;
+    if (props) body.props = props;
     const res = await fetch(`${MM_URL}/api/v4/posts`, {
       method: "POST",
       headers: {
@@ -222,6 +289,18 @@ export async function mmTodo(
     : ":large_blue_circle:";
   const ctxStr = context ? ` — *${context}*` : "";
   await mmPost("to-do", `${icon} ${item}${ctxStr}`);
+
+  // Dual-write to DB for /todo slash command
+  try {
+    await ensureTodoSchema();
+    await pgQuery(
+      `INSERT INTO mm_todo_items (item, context, priority, source, project_name)
+       VALUES ($1, $2, $3, 'system', $4)`,
+      [item, context || null, priority || "info", context || null]
+    );
+  } catch (e: any) {
+    console.error("[mm-notify] Todo DB write failed:", e.message);
+  }
 }
 
 /**
@@ -242,4 +321,40 @@ export async function mmQueueUpdate(
   const icon = icons[action] || ":pushpin:";
   const detailStr = details ? ` — ${details}` : "";
   await mmPost("queue", `${icon} **${project}** ${action}${detailStr}`);
+}
+
+
+// ── Shared notification helpers ─────────────────────────────────────
+// Import these instead of defining local copies in each module.
+
+export async function mmNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
+  const emoji = tags?.length ? `:${tags[0]}: ` : "";
+  const titleStr = title ? `**${emoji}${title}**\n` : "";
+  await mmPost("dev-logs", `${titleStr}${message}`);
+}
+
+export async function mmError(module: string, op: string, error: string, meta?: Record<string, any>): Promise<void> {
+  const ts = new Date().toISOString();
+  console.error(`[${ts}] [ERROR] [${module}] [${op}] ${error}${meta ? " " + JSON.stringify(meta) : ""}`);
+  await mmAlert(module, op, error, meta);
+}
+
+export async function mmWarn(module: string, op: string, message: string, meta?: Record<string, any>): Promise<void> {
+  const ts = new Date().toISOString();
+  console.warn(`[${ts}] [WARN] [${module}] [${op}] ${message}${meta ? " " + JSON.stringify(meta) : ""}`);
+  const metaStr = meta ? "\n```json\n" + JSON.stringify(meta, null, 2) + "\n```" : "";
+  await mmPost("alerts", `#### :warning: Warning in \`${module}.${op}\`\n${message}${metaStr}`);
+}
+
+// ── Structured logger factory ───────────────────────────────────────
+
+export function createLogger(module: string) {
+  return function log(level: "info" | "warn" | "error", op: string, msg: string, meta?: Record<string, any>) {
+    const ts = new Date().toISOString();
+    const prefix = `[${ts}] [${level.toUpperCase()}] [${module}] [${op}]`;
+    const metaStr = meta ? " " + JSON.stringify(meta) : "";
+    if (level === "error") console.error(`${prefix} ${msg}${metaStr}`);
+    else if (level === "warn") console.warn(`${prefix} ${msg}${metaStr}`);
+    else console.log(`${prefix} ${msg}${metaStr}`);
+  };
 }

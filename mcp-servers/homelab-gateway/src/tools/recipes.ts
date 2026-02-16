@@ -1,49 +1,137 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { vaultGet, vaultPut, vaultDelete, vaultList } from "../utils/vault.js";
 
 // Vault for recipe storage, Docker API for container lifecycle
-const VAULT_ADDR = process.env.VAULT_ADDR || "http://Vault:8200";
-const VAULT_TOKEN = process.env.VAULT_TOKEN || "";
-const VAULT_MOUNT = process.env.VAULT_MOUNT || "homelab";
+
 const DOCKER_HOST = process.env.DOCKER_HOST || "http://docker-socket-proxy:2375";
+const GITLAB_URL = process.env.GITLAB_URL || "http://gitlab-ce:80";
+const GITLAB_TOKEN = process.env.GITLAB_TOKEN || "";
+const GITLAB_INFRA_PROJECT = "homelab-projects/homelab-infrastructure";
 
 // --- Vault helpers (recipe storage) ---
 
-async function vaultGet(path: string): Promise<any> {
-  const res = await fetch(`${VAULT_ADDR}/v1/${VAULT_MOUNT}/data/${path}`, {
-    headers: { "X-Vault-Token": VAULT_TOKEN },
-  });
-  if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`Vault GET ${res.status}: ${await res.text()}`);
-  const body = await res.json();
-  return body.data?.data || null;
+
+
+
+
+
+
+
+
+
+// --- GitLab API helpers (recipe export) ---
+
+const SECRET_PATTERNS = /PASSWORD|TOKEN|KEY|SECRET|CREDENTIAL|AUTH/i;
+
+function redactSecrets(env: Record<string, string>): Record<string, string> {
+  const redacted: Record<string, string> = {};
+  for (const [k, v] of Object.entries(env)) {
+    redacted[k] = SECRET_PATTERNS.test(k) ? "***REDACTED***" : v;
+  }
+  return redacted;
 }
 
-async function vaultPut(path: string, data: Record<string, any>): Promise<void> {
-  const res = await fetch(`${VAULT_ADDR}/v1/${VAULT_MOUNT}/data/${path}`, {
+async function gitlabCommitFiles(
+  files: { path: string; content: string; action: "create" | "update" | "delete" }[],
+  message: string,
+  branch = "main",
+): Promise<{ ok: boolean; message: string }> {
+  if (!GITLAB_TOKEN) return { ok: false, message: "GITLAB_TOKEN not configured" };
+
+  const projectPath = encodeURIComponent(GITLAB_INFRA_PROJECT);
+  const actions = files.map((f) => ({
+    action: f.action,
+    file_path: f.path,
+    content: f.action !== "delete" ? f.content : undefined,
+  }));
+
+  const res = await fetch(`${GITLAB_URL}/api/v4/projects/${projectPath}/repository/commits`, {
     method: "POST",
-    headers: { "X-Vault-Token": VAULT_TOKEN, "Content-Type": "application/json" },
-    body: JSON.stringify({ data }),
+    headers: {
+      "PRIVATE-TOKEN": GITLAB_TOKEN,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      branch,
+      commit_message: message,
+      actions,
+    }),
   });
-  if (!res.ok) throw new Error(`Vault PUT ${res.status}: ${await res.text()}`);
+
+  if (!res.ok) {
+    const err = await res.text();
+    // If file already exists and we tried to create, retry with update
+    if (res.status === 400 && err.includes("already exists")) {
+      const retryActions = actions.map((a) => ({ ...a, action: "update" as const }));
+      const retry = await fetch(`${GITLAB_URL}/api/v4/projects/${projectPath}/repository/commits`, {
+        method: "POST",
+        headers: { "PRIVATE-TOKEN": GITLAB_TOKEN, "Content-Type": "application/json" },
+        body: JSON.stringify({ branch, commit_message: message, actions: retryActions }),
+      });
+      if (!retry.ok) throw new Error(`GitLab commit retry failed (${retry.status}): ${await retry.text()}`);
+      return { ok: true, message: "Committed (updated existing files)" };
+    }
+    throw new Error(`GitLab commit failed (${res.status}): ${err}`);
+  }
+
+  return { ok: true, message: "Committed successfully" };
 }
 
-async function vaultDelete(path: string): Promise<void> {
-  const res = await fetch(`${VAULT_ADDR}/v1/${VAULT_MOUNT}/metadata/${path}`, {
-    method: "DELETE",
-    headers: { "X-Vault-Token": VAULT_TOKEN },
-  });
-  if (!res.ok && res.status !== 404) throw new Error(`Vault DELETE ${res.status}: ${await res.text()}`);
+// Debounced auto-export (30s timer, batches rapid changes)
+let exportTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleAutoExport(): void {
+  if (exportTimer) clearTimeout(exportTimer);
+  exportTimer = setTimeout(async () => {
+    exportTimer = null;
+    try {
+      await doExportToGit();
+      console.log("[recipes] Auto-export to git completed");
+    } catch (e: any) {
+      console.error("[recipes] Auto-export failed:", e.message);
+    }
+  }, 30_000);
 }
 
-async function vaultList(prefix: string): Promise<string[]> {
-  const res = await fetch(`${VAULT_ADDR}/v1/${VAULT_MOUNT}/metadata/${prefix}?list=true`, {
-    headers: { "X-Vault-Token": VAULT_TOKEN },
-  });
-  if (res.status === 404) return [];
-  if (!res.ok) throw new Error(`Vault LIST ${res.status}: ${await res.text()}`);
-  const body = await res.json();
-  return body.data?.keys || [];
+async function doExportToGit(): Promise<{
+  exported: string[];
+  skipped: string[];
+  message: string;
+}> {
+  const keys = await vaultList("recipes/");
+  if (keys.length === 0) return { exported: [], skipped: [], message: "No recipes to export" };
+
+  const files: { path: string; content: string; action: "create" | "update" }[] = [];
+  const exported: string[] = [];
+
+  for (const key of keys) {
+    const data = await vaultGet(`recipes/${key}`);
+    if (!data) continue;
+
+    // Deep-copy and redact secrets
+    const safe = { ...data };
+    if (safe.env) safe.env = redactSecrets(safe.env);
+
+    files.push({
+      path: `recipes/${key}.json`,
+      content: JSON.stringify(safe, null, 2) + "\n",
+      action: "update", // use update; GitLab auto-creates if needed with create
+    });
+    exported.push(key);
+  }
+
+  if (files.length === 0) return { exported: [], skipped: keys, message: "No exportable recipes" };
+
+  // Try create first, fall back to update
+  const createFiles = files.map((f) => ({ ...f, action: "create" as const }));
+  try {
+    await gitlabCommitFiles(createFiles, `chore(recipes): export ${exported.length} recipes from Vault`);
+  } catch {
+    await gitlabCommitFiles(files, `chore(recipes): export ${exported.length} recipes from Vault`);
+  }
+
+  return { exported, skipped: [], message: `Exported ${exported.length} recipes to ${GITLAB_INFRA_PROJECT}` };
 }
 
 // --- Docker API helpers ---
@@ -195,6 +283,7 @@ const tools: Record<string, {
         updated_at: new Date().toISOString(),
       };
       await vaultPut(`recipes/${p.name}`, recipe as any);
+      scheduleAutoExport(); // fire-and-forget git export
       return { ok: true, name: p.name, message: `Recipe '${p.name}' stored. Use preview_deploy to see the Docker config, or deploy_recipe to create the container.` };
     },
   },
@@ -204,6 +293,7 @@ const tools: Record<string, {
     params: { name: "Recipe name" },
     handler: async (p) => {
       await vaultDelete(`recipes/${p.name}`);
+      scheduleAutoExport(); // fire-and-forget git export
       return { ok: true, name: p.name, message: `Recipe '${p.name}' deleted from Vault` };
     },
   },
@@ -324,11 +414,12 @@ const tools: Record<string, {
       const containerName = p.container_name || data.name;
       const { body } = recipeToDockerConfig(data, containerName);
 
-      // Stop and remove existing container if it exists
+      // Rename old container for rollback instead of deleting
       const existing = await containerExists(containerName);
+      const backupName = `${containerName}-rollback-${Date.now()}`;
       if (existing) {
         try { await dockerFetch(`/containers/${containerName}/stop`, { method: "POST" }); } catch {}
-        try { await dockerFetch(`/containers/${containerName}?force=true`, { method: "DELETE" }); } catch {}
+        try { await dockerFetch(`/containers/${containerName}/rename?name=${encodeURIComponent(backupName)}`, { method: "POST" }); } catch {}
       }
 
       // Pull image
@@ -337,21 +428,37 @@ const tools: Record<string, {
         await dockerFetch(`/images/create?fromImage=${encodeURIComponent(imageName)}&tag=${encodeURIComponent(tag)}`, { method: "POST" });
       } catch {}
 
-      // Create and start
-      const created = await dockerFetch(`/containers/create?name=${encodeURIComponent(containerName)}`, {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
-      await dockerFetch(`/containers/${created.Id}/start`, { method: "POST" });
+      // Create and start — rollback on failure
+      try {
+        const created = await dockerFetch(`/containers/create?name=${encodeURIComponent(containerName)}`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        await dockerFetch(`/containers/${created.Id}/start`, { method: "POST" });
 
-      return {
-        ok: true,
-        container_id: created.Id,
-        container_name: containerName,
-        image: data.image,
-        previous_existed: !!existing,
-        message: `Container '${containerName}' redeployed from recipe '${p.name}'.`,
-      };
+        // Success — clean up the old container
+        if (existing) {
+          try { await dockerFetch(`/containers/${backupName}?force=true`, { method: "DELETE" }); } catch {}
+        }
+
+        return {
+          ok: true,
+          container_id: created.Id,
+          container_name: containerName,
+          image: data.image,
+          previous_existed: !!existing,
+          message: `Container '${containerName}' redeployed from recipe '${p.name}'.`,
+        };
+      } catch (deployErr: any) {
+        // Rollback: restore the old container
+        if (existing) {
+          try {
+            await dockerFetch(`/containers/${backupName}/rename?name=${encodeURIComponent(containerName)}`, { method: "POST" });
+            await dockerFetch(`/containers/${containerName}/start`, { method: "POST" });
+          } catch {}
+        }
+        throw new Error(`Redeploy failed, rolled back to previous container: ${deployErr.message}`);
+      }
     },
   },
 
@@ -425,6 +532,7 @@ const tools: Record<string, {
       };
 
       await vaultPut(`recipes/${recipeName}`, recipe as any);
+      scheduleAutoExport(); // fire-and-forget git export
       return {
         ok: true,
         recipe_name: recipeName,
@@ -435,6 +543,14 @@ const tools: Record<string, {
         message: `Container '${p.container_name}' imported as recipe '${recipeName}'. Review with get_recipe and edit if needed.`,
       };
     },
+  },
+
+  // ── Git Export ─────────────────────────────────────────────
+
+  export_to_git: {
+    description: "Export all recipes from Vault to the homelab-infrastructure GitLab repo as JSON files. Secrets are automatically redacted.",
+    params: {},
+    handler: async () => doExportToGit(),
   },
 };
 
@@ -480,3 +596,4 @@ export function registerRecipeTools(server: McpServer) {
     }
   );
 }
+

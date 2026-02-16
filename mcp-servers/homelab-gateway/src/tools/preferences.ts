@@ -2,26 +2,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { getEmbedding } from "../utils/embeddings.js";
 
-const QDRANT_URL = process.env.QDRANT_URL || "http://Qdrant:6333";
+import { qdrantFetch } from "../utils/qdrant.js";
+
 const COLLECTION_NAME = "dev-preferences";
 const VECTOR_SIZE = 384; // all-MiniLM-L6-v2
-
-async function qdrantFetch(endpoint: string, options: RequestInit = {}) {
-  const url = `${QDRANT_URL}${endpoint}`;
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options.headers,
-    },
-  });
-
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(`Qdrant API error: ${JSON.stringify(data)}`);
-  }
-  return data;
-}
 
 async function ensureCollection() {
   try {

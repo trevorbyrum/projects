@@ -1,47 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import pg from "pg";
 import pgvector from "pgvector/pg";
+import { getPool, pgQuery as query } from "../utils/postgres.js";
 
-const { Pool } = pg;
-
-const POSTGRES_HOST = process.env.POSTGRES_HOST || "pgvector-18";
-const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || "5432");
-const POSTGRES_USER = process.env.POSTGRES_USER || "";
-const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || "";
-const POSTGRES_DB = process.env.POSTGRES_DB || "";
-
-let pool: pg.Pool | null = null;
-
-async function getPool(): Promise<pg.Pool> {
-  if (!pool) {
-    if (!POSTGRES_USER || !POSTGRES_PASSWORD || !POSTGRES_DB) {
-      throw new Error("PostgreSQL not configured");
-    }
-    pool = new Pool({
-      host: POSTGRES_HOST,
-      port: POSTGRES_PORT,
-      user: POSTGRES_USER,
-      password: POSTGRES_PASSWORD,
-      database: POSTGRES_DB,
-    });
-
-    const client = await pool.connect();
-    try {
-      await pgvector.registerType(client);
-    } finally {
-      client.release();
-    }
-  }
-  return pool;
-}
-
-async function query(sql: string, params: any[] = []): Promise<any> {
-  const p = await getPool();
-  const client = await p.connect();
+// Register pgvector type on first use
+let vectorRegistered = false;
+async function ensureVectorType(): Promise<void> {
+  if (vectorRegistered) return;
+  const client = await getPool().connect();
   try {
-    const result = await client.query(sql, params);
-    return result;
+    await pgvector.registerType(client);
+    vectorRegistered = true;
   } finally {
     client.release();
   }
@@ -79,9 +48,10 @@ const tools: Record<string, { description: string; params: Record<string, string
     description: "Insert a vector embedding into a table",
     params: { table: "Table name", embedding: "JSON array of numbers (the vector)", data: "JSON object of additional column values (optional)" },
     handler: async ({ table, embedding, data }) => {
+      await ensureVectorType();
       const parsedEmbedding = typeof embedding === "string" ? JSON.parse(embedding) : embedding;
       const parsedData = data ? (typeof data === "string" ? JSON.parse(data) : data) : {};
-
+      
       const columns = ["embedding"];
       const values = [pgvector.toSql(parsedEmbedding)];
       const placeholders = ["$1"];
@@ -102,6 +72,7 @@ const tools: Record<string, { description: string; params: Record<string, string
     description: "Search for similar vectors using cosine similarity",
     params: { table: "Table name", embedding: "JSON array of numbers (query vector)", limit: "Number of results (default 10)", columns: "Comma-separated additional columns to return", where: "WHERE clause without 'WHERE' keyword (optional)" },
     handler: async ({ table, embedding, limit = 10, columns, where }) => {
+      await ensureVectorType();
       const parsedEmbedding = typeof embedding === "string" ? JSON.parse(embedding) : embedding;
       const selectCols = ["id", "1 - (embedding <=> $1) as similarity"];
       if (columns) selectCols.push(...columns.split(",").map((c: string) => c.trim()));

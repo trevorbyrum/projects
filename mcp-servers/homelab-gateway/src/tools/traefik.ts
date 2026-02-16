@@ -101,7 +101,7 @@ const tools: Record<string, {
 
   find_route: {
     description: "Find which router handles a given hostname (searches all routers for a Host match)",
-    params: { hostname: "Hostname to search for (e.g. 'dify.your-domain.com')" },
+    params: { hostname: "Hostname to search for (e.g. 'your-domain.com')" },
     handler: async (p) => {
       const routers = await traefikFetch("/api/http/routers");
       const matches = routers.filter((r: any) =>
@@ -182,3 +182,4 @@ export function registerTraefikTools(server: McpServer) {
     }
   );
 }
+

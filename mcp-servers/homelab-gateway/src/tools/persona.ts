@@ -1,20 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import pg from "pg";
 import { getEmbedding } from "../utils/embeddings.js";
 import { searchPreferences } from "./preferences.js";
-import { mmAlert, mmPost } from "./mm-notify.js";
+import { mmAlert, mmPost, mmNotify, mmError } from "./mm-notify.js";
+import { pgQuery } from "../utils/postgres.js";
+import { qdrantFetch } from "../utils/qdrant.js";
+import { trackDify } from "../utils/langfuse.js";
 
-const { Pool } = pg;
 
 // --- Config ---
 
-const POSTGRES_HOST = process.env.POSTGRES_HOST || "pgvector-18";
-const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || "5432");
-const POSTGRES_USER = process.env.POSTGRES_USER || "";
-const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || "";
-const POSTGRES_DB = process.env.POSTGRES_DB || "";
-const QDRANT_URL = process.env.QDRANT_URL || "http://Qdrant:6333";
+
+
 const DIFY_API_BASE = process.env.DIFY_API_BASE || "http://dify-api:5001";
 const DIFY_PERSONA_GENERATE_KEY = process.env.DIFY_PERSONA_GENERATE_KEY || "";
 const DIFY_PERSONA_DIGEST_KEY = process.env.DIFY_PERSONA_DIGEST_KEY || "";
@@ -36,33 +33,7 @@ const CATEGORY_TARGETS: Record<string, number> = {
   life_philosophy: 40, cognitive_patterns: 35, voice_and_tone: 55,
 };
 
-// --- PG Pool ---
-
-let pool: pg.Pool | null = null;
 let autoGenerateInProgress = false;
-
-function getPool(): pg.Pool {
-  if (!pool) {
-    if (!POSTGRES_USER || !POSTGRES_PASSWORD || !POSTGRES_DB) {
-      throw new Error("PostgreSQL not configured - check POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB");
-    }
-    pool = new Pool({
-      host: POSTGRES_HOST, port: POSTGRES_PORT,
-      user: POSTGRES_USER, password: POSTGRES_PASSWORD,
-      database: POSTGRES_DB,
-    });
-  }
-  return pool;
-}
-
-async function pgQuery(sql: string, params: any[] = []): Promise<any> {
-  const client = await getPool().connect();
-  try {
-    return await client.query(sql, params);
-  } finally {
-    client.release();
-  }
-}
 
 // --- Logging ---
 
@@ -75,29 +46,11 @@ function log(level: "info" | "warn" | "error", module: string, op: string, msg: 
   else console.log(`${prefix} ${msg}${metaStr}`);
 }
 
-async function ntfyNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
-  const emoji = tags?.length ? `:${tags[0]}: ` : "";
-  const titleStr = title ? `**${emoji}${title}**\n` : "";
-  await mmPost("dev-logs", `${titleStr}${message}`);
-}
 
-async function ntfyError(module: string, op: string, error: string, meta?: Record<string, any>) {
-  log("error", module, op, error, meta);
-  await mmAlert(module, op, error, meta);
-}
 
 // --- Qdrant helpers ---
 
-async function qdrantFetch(endpoint: string, options: RequestInit = {}) {
-  const url = `${QDRANT_URL}${endpoint}`;
-  const response = await fetch(url, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...options.headers },
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(`Qdrant API error: ${JSON.stringify(data)}`);
-  return data;
-}
+
 
 async function ensureCollection() {
   try {
@@ -128,7 +81,7 @@ async function callDify(apiKey: string, inputs: Record<string, string>, workflow
     if (!res.ok) {
       const body = await res.text();
       const errMsg = `Dify workflow ${label} returned HTTP ${res.status}: ${body.slice(0, 500)}`;
-      await ntfyError("dify", label, errMsg, { status: res.status, elapsed_ms: elapsed });
+      await mmError("dify", label, errMsg, { status: res.status, elapsed_ms: elapsed });
       throw new Error(errMsg);
     }
 
@@ -136,12 +89,29 @@ async function callDify(apiKey: string, inputs: Record<string, string>, workflow
     log("info", "dify", "call", `Workflow ${label} completed (${elapsed}ms)`, {
       status: result?.data?.status, tokens: result?.data?.total_tokens, elapsed_ms: elapsed,
     });
+    trackDify({
+      workflow: label,
+      inputs,
+      output: result?.data?.outputs,
+      tokens: result?.data?.total_tokens,
+      cost: result?.data?.total_price,
+      elapsed_ms: elapsed,
+      status: result?.data?.status,
+      tags: ["dify", "persona"],
+    });
     return result;
   } catch (e: any) {
     if (!e.message.includes("Dify workflow")) {
       const elapsed = Date.now() - startTime;
-      await ntfyError("dify", label, `Workflow call failed: ${e.message}`, { elapsed_ms: elapsed });
+      await mmError("dify", label, `Workflow call failed: ${e.message}`, { elapsed_ms: elapsed });
     }
+    trackDify({
+      workflow: label,
+      inputs,
+      elapsed_ms: Date.now() - startTime,
+      error: e.message,
+      tags: ["dify", "persona"],
+    });
     throw e;
   }
 }
@@ -217,7 +187,7 @@ async function digestResponse(responseId: number): Promise<void> {
       parsed = JSON.parse(jsonMatch ? jsonMatch[1].trim() : outputText.trim());
     } catch (parseErr: any) {
       log("warn", "digest", "parse", `Failed to parse Dify output for response ${responseId}: ${parseErr.message}`);
-      await ntfyError("digest", "parse", `Failed to parse digest output for response ${responseId}`, {
+      await mmError("digest", "parse", `Failed to parse digest output for response ${responseId}`, {
         error: parseErr.message, output_preview: outputText.slice(0, 300),
       });
       return;
@@ -326,7 +296,7 @@ async function digestResponse(responseId: number): Promise<void> {
       profile_entries: profileEntries.length, elapsed_ms: Date.now() - startTime,
     });
   } catch (e: any) {
-    await ntfyError("digest", "response", `Digestion failed for response ${responseId}: ${e.message}`, {
+    await mmError("digest", "response", `Digestion failed for response ${responseId}: ${e.message}`, {
       response_id: responseId, elapsed_ms: Date.now() - startTime,
     });
   }
@@ -457,7 +427,7 @@ async function checkAndAutoGenerate(): Promise<void> {
     log("info", "auto-generate", "complete", "Auto-generation completed");
   } catch (e: any) {
     log("error", "auto-generate", "failed", `Auto-generation failed: ${e.message}`);
-    await ntfyError("auto-generate", "trigger", `Auto-generation failed: ${e.message}`);
+    await mmError("auto-generate", "trigger", `Auto-generation failed: ${e.message}`);
   } finally {
     autoGenerateInProgress = false;
   }
@@ -486,7 +456,7 @@ const tools: Record<string, {
         return { error: "No active batch. Call generate_batch to create one." };
       }
 
-      let sql = `SELECT * FROM persona_questions WHERE batch_id = $1 AND status = 'pending'`;
+      let sql = `SELECT * FROM (SELECT * FROM persona_questions WHERE batch_id = $1 AND status = 'pending'`;
       const params: any[] = [batch.rows[0].id];
       let idx = 2;
 
@@ -498,7 +468,7 @@ const tools: Record<string, {
       if (p.mode) { sql += ` AND mode = $${idx++}`; params.push(p.mode); }
       if (p.category) { sql += ` AND category = $${idx++}`; params.push(p.category); }
 
-      sql += ` ORDER BY RANDOM() LIMIT 1`;
+      sql += `) _q ORDER BY RANDOM() LIMIT 1`;
 
       const result = await pgQuery(sql, params);
       if (result.rowCount === 0) {
@@ -578,7 +548,7 @@ const tools: Record<string, {
             `UPDATE persona_batches SET status = 'completed', completed_at = NOW() WHERE id = $1`,
             [b.id]
           );
-          await ntfyNotify(`Batch #${b.batch_number} complete! Ready for next batch.`, "Persona", 3, ["checkered_flag"]);
+          await mmNotify(`Batch #${b.batch_number} complete! Ready for next batch.`, "Persona", 3, ["checkered_flag"]);
         }
       }
 
@@ -735,7 +705,7 @@ const tools: Record<string, {
             questions = questions.concat(generated.slice(0, difySlots));
           }
         } catch (parseErr: any) {
-          await ntfyError("generate", "parse", `Failed to parse generated questions: ${parseErr.message}`, {
+          await mmError("generate", "parse", `Failed to parse generated questions: ${parseErr.message}`, {
             output_preview: outputText.slice(0, 300),
           });
           return { error: "Failed to parse Dify output. Check logs.", batch_number: batchNumber };
@@ -778,7 +748,7 @@ const tools: Record<string, {
         ["batch_generated", JSON.stringify({ batch_number: batchNumber, total: questions.length, follow_ups_included: followUpCount })]
       );
 
-      await ntfyNotify(`Batch #${batchNumber} ready (${questions.length} questions)`, "Persona", 3, ["brain"]);
+      await mmNotify(`Batch #${batchNumber} ready (${questions.length} questions)`, "Persona", 3, ["brain"]);
 
       return {
         batch_number: batchNumber, batch_id: batchId,
@@ -1062,7 +1032,7 @@ export function registerPersonaTools(server: McpServer) {
         log("error", "call", tool, `Tool failed: ${error.message}`);
         const criticalTools = ["submit_answer", "generate_batch", "retry_digest"];
         if (criticalTools.includes(tool)) {
-          await ntfyError("call", tool, `Tool ${tool} failed: ${error.message}`, { tool, params: Object.keys(params || {}) });
+          await mmError("call", tool, `Tool ${tool} failed: ${error.message}`, { tool, params: Object.keys(params || {}) });
         }
         return { content: [{ type: "text", text: JSON.stringify({ error: error.message }) }], isError: true };
       }

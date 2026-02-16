@@ -6,41 +6,33 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import pg from "pg";
-import { mmPostToChannel, mmCreateChannel, mmGetTeamId, mmPipelineUpdate } from "./mm-notify.js";
+import { mmPostToChannel, mmCreateChannel, mmGetTeamId, mmPipelineUpdate, mmDeliverablePdf } from "./mm-notify.js";
+import { renderSowPdf } from "./pdf-renderer.js";
+import { pgQuery } from "../utils/postgres.js";
+import { readResearchDoc, getRepoForModule } from "../utils/research-docs.js";
+import { trackDify } from "../utils/langfuse.js";
 
-const { Pool } = pg;
 
-const POSTGRES_HOST = process.env.POSTGRES_HOST || "pgvector-18";
-const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || "5432");
-const POSTGRES_USER = process.env.POSTGRES_USER || "";
-const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || "";
-const POSTGRES_DB = process.env.POSTGRES_DB || "";
+
 
 const DIFY_API_BASE = process.env.DIFY_API_BASE || "http://dify-api:5001";
 
-// Dify workflow keys for war room agents (loaded from env vars)
+// Dify workflow keys for war room agents (to be created in Dify)
 const WARROOM_DIFY_KEYS: Record<string, string> = {
   "pm-warroom-facilitate":     process.env.DIFY_PM_WARROOM_KEY || "",
   "architect-warroom-respond": process.env.DIFY_ARCHITECT_WARROOM_KEY || "",
   "security-warroom-respond":  process.env.DIFY_SECURITY_WARROOM_KEY || "",
 };
 
-let pool: pg.Pool | null = null;
-function getPool(): pg.Pool {
-  if (!pool) {
-    pool = new Pool({
-      host: POSTGRES_HOST, port: POSTGRES_PORT,
-      user: POSTGRES_USER, password: POSTGRES_PASSWORD, database: POSTGRES_DB,
-    });
-  }
-  return pool;
-}
+// Agent identity overrides for Mattermost bot posts
+const AGENT_PROPS = {
+  pm: { override_username: "PM Facilitator" },
+  architect: { override_username: "Architect" },
+  security: { override_username: "Security Expert" },
+  system: { override_username: "War Room" },
+};
 
-async function pgQuery(sql: string, params: any[] = []): Promise<any> {
-  const client = await getPool().connect();
-  try { return await client.query(sql, params); } finally { client.release(); }
-}
+
 
 function log(level: "info" | "warn" | "error", op: string, msg: string, meta?: Record<string, any>) {
   const ts = new Date().toISOString();
@@ -51,12 +43,13 @@ function log(level: "info" | "warn" | "error", op: string, msg: string, meta?: R
   else console.log(`${prefix} ${msg}${metaStr}`);
 }
 
-// -- Dify Workflow Caller -----------------------------------------------------
+// ── Dify Workflow Caller ────────────────────────────────────
 
 async function callWarroomDify(workflow: string, inputs: Record<string, string>): Promise<any> {
+  const lfStart = Date.now();
   const apiKey = WARROOM_DIFY_KEYS[workflow];
   if (!apiKey) throw new Error(`No Dify API key for war room workflow: ${workflow}. Set env var.`);
-
+  
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 300000); // 5 min
   try {
@@ -78,13 +71,23 @@ async function callWarroomDify(workflow: string, inputs: Record<string, string>)
     if (result?.data?.status !== "succeeded") {
       throw new Error(`Dify ${workflow} failed: ${result?.data?.error || "unknown"}`);
     }
+    trackDify({
+      workflow,
+      inputs,
+      output: result.data.outputs,
+      tokens: result.data.total_tokens,
+      cost: result.data.total_price,
+      elapsed_ms: Date.now() - lfStart,
+      status: result.data.status,
+      tags: ["dify", "war-room"],
+    });
     return result.data.outputs?.result || result.data.outputs;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-// -- War Room State Machine ---------------------------------------------------
+// ── War Room State Machine ──────────────────────────────────
 
 type WarRoomState = "setup" | "agenda_generated" | "discussing" | "escalated" | "completed";
 
@@ -101,15 +104,23 @@ async function runWarRoom(sessionId: number): Promise<void> {
   const project = (await pgQuery(`SELECT * FROM pipeline_projects WHERE id = $1`, [session.project_id])).rows[0];
   if (!project) throw new Error(`Project ${session.project_id} not found`);
 
-  // Get research summary
-  const research = await pgQuery(
-    `SELECT section, findings, concerns, recommendations FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
-    [project.id]
-  );
-  const researchSummary = research.rows.map((r: any) => {
-    const findings = typeof r.findings === "string" ? r.findings : JSON.stringify(r.findings);
-    return `## ${r.section}\n${findings}\nConcerns: ${(r.concerns || []).join(", ")}\nRecommendations: ${(r.recommendations || []).join(", ")}`;
-  }).join("\n\n");
+  // Get research summary — prefer file-based summary, fall back to DB
+  let researchSummary = "";
+  try {
+    const summaryDoc = await readResearchDoc(project.slug, getRepoForModule("tech-research"), "tech-research", "_summary");
+    if (summaryDoc) researchSummary = summaryDoc.content;
+  } catch { /* fall through to DB */ }
+
+  if (!researchSummary) {
+    const research = await pgQuery(
+      `SELECT section, findings, concerns, recommendations FROM pipeline_research WHERE project_id = $1 AND status = 'complete'`,
+      [project.id]
+    );
+    researchSummary = research.rows.map((r: any) => {
+      const findings = typeof r.findings === "string" ? r.findings : JSON.stringify(r.findings);
+      return `## ${r.section}\n${findings}\nConcerns: ${(r.concerns || []).join(", ")}\nRecommendations: ${(r.recommendations || []).join(", ")}`;
+    }).join("\n\n");
+  }
 
   const sowDraft = project.scope_of_work ? JSON.stringify(project.scope_of_work) : "No SoW draft yet";
 
@@ -144,9 +155,10 @@ async function runWarRoom(sessionId: number): Promise<void> {
 
   // Post agenda to channel
   await mmPostToChannel(session.channel_id,
-    `### :clipboard: War Room Agenda — ${project.name}\n\n` +
+    `### War Room Agenda — ${project.name}\n\n` +
     agenda.map((t: AgendaTopic, i: number) => `${i + 1}. **[${t.priority.toUpperCase()}]** ${t.topic}\n   _${t.context}_`).join("\n") +
-    `\n\n---\n_${agenda.length} topics to discuss. Starting now..._`
+    `\n\n---\n_${agenda.length} topics to discuss. Starting now..._`,
+    undefined, AGENT_PROPS.system
   );
 
   // Step 2: Discuss each topic
@@ -162,7 +174,8 @@ async function runWarRoom(sessionId: number): Promise<void> {
 
     // Post topic as thread root
     const topicPost = await mmPostToChannel(session.channel_id,
-      `### Topic ${topicIdx + 1}: ${topic.topic}\n**Priority:** ${topic.priority}\n**Context:** ${topic.context}`
+      `### Topic ${topicIdx + 1}: ${topic.topic}\n**Priority:** ${topic.priority}\n**Context:** ${topic.context}`,
+      undefined, AGENT_PROPS.system
     );
     const threadId = topicPost?.id;
 
@@ -188,8 +201,8 @@ async function runWarRoom(sessionId: number): Promise<void> {
         architectResponse = `[Architect agent error: ${e.message}]`;
       }
       await mmPostToChannel(session.channel_id,
-        `:building_construction: **Architect** (round ${round}):\n${architectResponse}`,
-        threadId || undefined
+        `**Round ${round}:**\n${architectResponse}`,
+        threadId || undefined, AGENT_PROPS.architect
       );
 
       // Security responds
@@ -206,8 +219,8 @@ async function runWarRoom(sessionId: number): Promise<void> {
         securityResponse = `[Security agent error: ${e.message}]`;
       }
       await mmPostToChannel(session.channel_id,
-        `:shield: **Security Expert** (round ${round}):\n${securityResponse}`,
-        threadId || undefined
+        `**Round ${round}:**\n${securityResponse}`,
+        threadId || undefined, AGENT_PROPS.security
       );
 
       // PM synthesizes
@@ -231,10 +244,10 @@ async function runWarRoom(sessionId: number): Promise<void> {
       const actionItems = pmSynthesis.action_items || [];
 
       await mmPostToChannel(session.channel_id,
-        `:briefcase: **PM Facilitator** (round ${round}):\n${decision}` +
+        `**Round ${round}:**\n${decision}` +
         (actionItems.length > 0 ? `\n\n**Action items:**\n${actionItems.map((a: string) => `- ${a}`).join("\n")}` : "") +
         (consensus ? "\n\n:white_check_mark: **Consensus reached**" : round < MAX_ROUNDS ? "\n\n:arrows_counterclockwise: _Continuing discussion..._" : ""),
-        threadId || undefined
+        threadId || undefined, AGENT_PROPS.pm
       );
 
       if (consensus) {
@@ -251,7 +264,7 @@ async function runWarRoom(sessionId: number): Promise<void> {
       decisions.push({ topic: topic.topic, decision: "ESCALATED — requires human review", escalated: true, rounds: MAX_ROUNDS });
       await mmPostToChannel(session.channel_id,
         `:warning: **Escalated to human review:** ${topic.topic}\n_No consensus after ${MAX_ROUNDS} rounds. Please review the thread above and provide direction._`,
-        threadId || undefined
+        threadId || undefined, AGENT_PROPS.system
       );
     }
   }
@@ -267,7 +280,8 @@ async function runWarRoom(sessionId: number): Promise<void> {
     await updateState(sessionId, "escalated");
     await mmPostToChannel(session.channel_id,
       `### :pause_button: War Room Paused\n${escalations.length} topic(s) escalated for human review.\n` +
-      `Use \`resume_war_room\` after resolving escalations to generate the revised SoW.`
+      `Use \`resume_war_room\` after resolving escalations to generate the revised SoW.`,
+      undefined, AGENT_PROPS.system
     );
     await mmPipelineUpdate(project.name, `War room paused: ${escalations.length} escalation(s) need human review`, "warning");
     log("info", "escalation", `War room ${sessionId} paused with ${escalations.length} escalations`, { slug: project.slug });
@@ -288,7 +302,8 @@ async function finalizeWarRoom(sessionId: number): Promise<void> {
   ).join("\n");
 
   await mmPostToChannel(session.channel_id,
-    `### :page_facing_up: Generating Revised SoW\nIncorporating ${decisions.length} decisions from war room deliberation...`
+    `### Generating Revised SoW\nIncorporating ${decisions.length} decisions from war room deliberation...`,
+    undefined, AGENT_PROPS.pm
   );
 
   // Call PM to generate revised SoW
@@ -313,6 +328,25 @@ async function finalizeWarRoom(sessionId: number): Promise<void> {
     // Store revised SoW on project
     await pgQuery(`UPDATE pipeline_projects SET scope_of_work = $1, updated_at = NOW() WHERE id = $2`,
       [JSON.stringify(revisedSow), project.id]);
+
+    // Generate and distribute revised SoW PDF
+    try {
+      const pdfBuffer = await renderSowPdf({
+        project_name: project.name,
+        project_slug: project.slug,
+        scope_of_work: revisedSow,
+        priority: project.priority,
+      });
+      const isoDate = new Date().toISOString().split("T")[0];
+      await mmDeliverablePdf(
+        { name: project.name, slug: project.slug },
+        `SoW-${project.slug}-revised-${isoDate}`,
+        pdfBuffer,
+        `Revised Statement of Work for **${project.name}** (War Room)`
+      );
+    } catch (pdfErr: any) {
+      log("warn", "finalize", `Revised SoW PDF generation failed (non-blocking): ${pdfErr.message}`);
+    }
   }
 
   await updateState(sessionId, "completed");
@@ -324,7 +358,7 @@ async function finalizeWarRoom(sessionId: number): Promise<void> {
     `**Revised SoW:** ${revisedSow ? "Generated and stored" : "Failed — using original"}\n\n` +
     `The revised SoW has been submitted for HitL review.`;
 
-  await mmPostToChannel(session.channel_id, summary);
+  await mmPostToChannel(session.channel_id, summary, undefined, AGENT_PROPS.system);
   await mmPipelineUpdate(project.name, "War room completed. Revised SoW ready for review.", "white_check_mark");
   log("info", "finalize", `War room ${sessionId} completed for ${project.slug}`, {
     decisions: decisions.length, escalations: (session.escalations || []).length,
@@ -335,7 +369,7 @@ async function updateState(sessionId: number, state: WarRoomState): Promise<void
   await pgQuery(`UPDATE war_room_sessions SET state = $1 WHERE id = $2`, [state, sessionId]);
 }
 
-// -- Sub-tools ----------------------------------------------------------------
+// ── Sub-tools ───────────────────────────────────────────────
 
 const tools: Record<string, {
   description: string;
@@ -382,10 +416,11 @@ const tools: Record<string, {
       const sessionId = session.rows[0].id;
 
       await mmPostToChannel(channel.id,
-        `### :fire: War Room Initiated — ${project.name}\n` +
+        `### War Room Initiated — ${project.name}\n` +
         `**Session ID:** ${sessionId}\n` +
         `**Agents:** PM Facilitator, Architect, Security Expert\n\n` +
-        `Generating debate agenda from research findings and draft SoW...`
+        `Generating debate agenda from research findings and draft SoW...`,
+        undefined, AGENT_PROPS.system
       );
 
       // Run war room in background
@@ -393,7 +428,8 @@ const tools: Record<string, {
         log("error", "run", `War room ${sessionId} crashed: ${err.message}`, { slug: p.slug });
         await updateState(sessionId, "escalated");
         await mmPostToChannel(channel.id,
-          `:x: **War room error:** ${err.message}\nSession paused. Use \`resume_war_room\` to retry.`
+          `:x: **War room error:** ${err.message}\nSession paused. Use \`resume_war_room\` to retry.`,
+          undefined, AGENT_PROPS.system
         );
       });
 
@@ -468,7 +504,7 @@ const tools: Record<string, {
       // Finalize in background
       finalizeWarRoom(session.id).catch(async (err) => {
         log("error", "resume", `Finalize failed: ${err.message}`);
-        await mmPostToChannel(session.channel_id, `:x: Finalization error: ${err.message}`);
+        await mmPostToChannel(session.channel_id, `:x: Finalization error: ${err.message}`, undefined, AGENT_PROPS.system);
       });
 
       return { session_id: session.id, status: "resuming", message: "Generating revised SoW from war room decisions..." };
@@ -501,7 +537,7 @@ const tools: Record<string, {
   },
 };
 
-// -- Registration -------------------------------------------------------------
+// ── Registration ────────────────────────────────────────────
 
 
 // Exported for use by projects.ts auto-pipeline
@@ -533,10 +569,15 @@ export async function startAndRunWarRoom(projectId: number): Promise<{ sessionId
   const sessionId = session.rows[0].id;
 
   await mmPostToChannel(channel.id,
-    `### :fire: War Room Initiated — ${project.name}\n` +
-    `**Session ID:** ${sessionId}\n` +
-    `**Agents:** PM Facilitator, Architect, Security Expert\n\n` +
-    `Generating debate agenda...`
+    `### War Room Initiated — ${project.name}
+` +
+    `**Session ID:** ${sessionId}
+` +
+    `**Agents:** PM Facilitator, Architect, Security Expert
+
+` +
+    `Generating debate agenda...`,
+    undefined, AGENT_PROPS.system
   );
 
   // Run synchronously — blocks until all topics debated and SoW revised
@@ -583,3 +624,4 @@ export function registerWarRoomTools(server: McpServer) {
     }
   );
 }
+

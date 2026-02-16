@@ -170,7 +170,7 @@ Read-side routing: Search Neo4j for structural queries — "what depends on X", 
 Naming convention: Use consistent casing per label.
 - Projects: PascalCase (PhysicianUX, FenceQuote)
 - Technologies/libraries: as commonly written (n8n, Neo4j, pgvector, SwiftUI)
-- People: full name (Jane Doe)
+- People: full name (Your Name)
 - Events: short descriptive phrase (gpu-failure-jan-2025, chose-qdrant-over-weaviate)
 
 Node labels (lowercase): project, component, technology, person, event, library

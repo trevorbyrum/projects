@@ -10,7 +10,7 @@ async function vaultRequest(method: string, path: string, body?: any): Promise<a
   if (!VAULT_TOKEN) {
     throw new Error("Vault not configured - check VAULT_TOKEN env var");
   }
-
+  
   const url = `${VAULT_ADDR}/v1/${path}`;
   const response = await fetch(url, {
     method,

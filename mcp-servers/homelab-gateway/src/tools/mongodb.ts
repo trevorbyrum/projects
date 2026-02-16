@@ -315,3 +315,4 @@ export function registerMongodbTools(server: McpServer) {
     }
   );
 }
+

@@ -6,6 +6,13 @@ services:
     container_name: homelab-mcp-gateway
     restart: unless-stopped
     env_file: .env
+    environment:
+      - ROLE=gateway
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 4G
     # ================================================================
     # TRAEFIK LABELS - DO NOT MODIFY
     # ================================================================
@@ -18,8 +25,24 @@ services:
     # ================================================================
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.mcp-gateway.rule=Host(`mcp.your-domain.com`)"
+      - "traefik.http.routers.mcp-gateway.rule=Host(`your-domain.com`)"
       - "traefik.http.services.mcp-gateway.loadbalancer.server.port=3500"
+    networks:
+      - traefik_proxy
+
+  kb-worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - ROLE=worker
+      - KB_QUEUE_MAX_CONCURRENT=3
+    deploy:
+      replicas: 2
+      resources:
+        limits:
+          cpus: '16'
+          memory: 32G
     networks:
       - traefik_proxy
 

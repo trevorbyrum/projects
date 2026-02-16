@@ -468,9 +468,18 @@ const tools: Record<string, { description: string; params: Record<string, string
     },
     handler: async ({ app_id, graph }) => {
       const parsed = typeof graph === "string" ? JSON.parse(graph) : graph;
+      let features = {};
+      let hash = "";
+      try {
+        const current = await consoleFetch(`/apps/${app_id}/workflows/draft`) as Record<string, unknown>;
+        features = (current.features as object) || {};
+        hash = (current.hash as string) || "";
+      } catch (_e) {
+        // Draft not initialized yet
+      }
       return await consoleFetch(`/apps/${app_id}/workflows/draft`, {
         method: "POST",
-        body: JSON.stringify(parsed),
+        body: JSON.stringify({ graph: parsed, features, hash }),
       });
     },
   },
@@ -479,7 +488,7 @@ const tools: Record<string, { description: string; params: Record<string, string
     description: "Publish a workflow draft to make it executable",
     params: { app_id: "string - the workflow app ID" },
     handler: async ({ app_id }) => {
-      return await consoleFetch(`/apps/${app_id}/workflows/publish`, { method: "POST" });
+      return await consoleFetch(`/apps/${app_id}/workflows/publish`, { method: "POST", body: JSON.stringify({}) });
     },
   },
 
@@ -545,6 +554,95 @@ const tools: Record<string, { description: string; params: Record<string, string
       });
     },
   },
+
+  run_workflow_async: {
+    description: "Start a workflow asynchronously - returns task_id and workflow_run_id immediately without waiting. Use get_workflow_run to poll for results.",
+    params: {
+      api_key: "string - the app's API key",
+      inputs: "object (optional) - workflow input variables",
+      user: "string (optional) - user identifier, default 'api-user'",
+    },
+    handler: async ({ api_key, inputs, user }) => {
+      const parsedInputs = inputs ? (typeof inputs === "string" ? JSON.parse(inputs) : inputs) : {};
+      const res = await fetch(`${DIFY_API_URL}/v1/workflows/run`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${api_key}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          inputs: parsedInputs,
+          response_mode: "streaming",
+          user: user || "api-user",
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Workflow start failed (${res.status}): ${err}`);
+      }
+      // Read SSE stream until we get workflow_started event with IDs
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let result: any = null;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() || "";
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.event === "workflow_started") {
+                  result = {
+                    task_id: data.task_id,
+                    workflow_run_id: data.workflow_run_id,
+                    status: "running",
+                  };
+                  break;
+                }
+              } catch {}
+            }
+          }
+          if (result) break;
+        }
+      } finally {
+        reader.cancel();
+      }
+      return result || { error: "No workflow_started event received" };
+    },
+  },
+
+  get_workflow_run: {
+    description: "Get status and results of a workflow run. Returns status (running/succeeded/failed/stopped), outputs, elapsed_time, total_tokens.",
+    params: {
+      api_key: "string - the app's API key",
+      workflow_run_id: "string - the workflow run ID from run_workflow_async",
+    },
+    handler: async ({ api_key, workflow_run_id }) => {
+      return await appFetch(`/workflows/run/${workflow_run_id}`, api_key);
+    },
+  },
+
+  stop_workflow_task: {
+    description: "Stop a running workflow task",
+    params: {
+      api_key: "string - the app's API key",
+      task_id: "string - the task ID from run_workflow_async",
+      user: "string (optional) - user identifier, default 'api-user'",
+    },
+    handler: async ({ api_key, task_id, user }) => {
+      return await appFetch(`/workflows/tasks/${task_id}/stop`, api_key, {
+        method: "POST",
+        body: JSON.stringify({ user: user || "api-user" }),
+      });
+    },
+  },
+
+
 
   completion: {
     description: "Send a text completion request via an app's per-app API key",
@@ -662,7 +760,7 @@ const tools: Record<string, { description: string; params: Record<string, string
 export function registerDifyTools(server: McpServer) {
   server.tool(
     "dify_list",
-    "List all available Dify AI platform tools. Dify is a self-hosted AI app builder at dify.your-domain.com. " +
+    "List all available Dify AI platform tools. Dify is a self-hosted AI app builder at your-domain.com. " +
     "Tools cover: app management (create/edit/delete apps), model provider config, " +
     "tool & MCP server management, knowledge base/RAG datasets, workflow editing, " +
     "runtime execution (chat, workflow, completion), monitoring/logs, and file uploads. " +
@@ -700,3 +798,4 @@ export function registerDifyTools(server: McpServer) {
     }
   );
 }
+

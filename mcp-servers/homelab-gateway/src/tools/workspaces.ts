@@ -1,19 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import pg from "pg";
 import { chromium } from "playwright";
 import { stat } from "fs/promises";
-import { mmAlert, mmPost } from "./mm-notify.js";
+import { mmAlert, mmPost, mmNotify, mmError } from "./mm-notify.js";
+import { pgQuery, getPool } from "../utils/postgres.js";
 
-const { Pool } = pg;
 
 // --- Environment ---
 
-const POSTGRES_HOST = process.env.POSTGRES_HOST || "pgvector-18";
-const POSTGRES_PORT = parseInt(process.env.POSTGRES_PORT || "5432");
-const POSTGRES_USER = process.env.POSTGRES_USER || "";
-const POSTGRES_PASSWORD = process.env.POSTGRES_PASSWORD || "";
-const POSTGRES_DB = process.env.POSTGRES_DB || "";
+
 
 const OPENHANDS_URL = process.env.OPENHANDS_URL || "http://openhands:3000";
 const OPENHANDS_API_KEY = process.env.OPENHANDS_API_KEY || "";
@@ -22,6 +17,10 @@ const GITLAB_URL = process.env.GITLAB_URL || "http://gitlab-ce:80";
 const GITLAB_TOKEN = process.env.GITLAB_TOKEN || process.env.GITHUB_TOKEN || "";
 
 const FIGMA_API_KEY = process.env.FIGMA_API_KEY || "";
+
+const GITLAB_REGISTRY_HOST = process.env.GITLAB_REGISTRY_HOST || "localhost:5050";
+const GITLAB_GROUP = process.env.GITLAB_GROUP || "homelab-projects";
+const PUBLIC_DOMAIN = process.env.PUBLIC_DOMAIN || "localhost";
 
 // -- Structured Logging --
 
@@ -38,50 +37,11 @@ function log(level: "info" | "warn" | "error", module: string, op: string, msg: 
   }
 }
 
-async function ntfyNotify(message: string, title?: string, _priority?: number, tags?: string[]): Promise<void> {
-  const emoji = tags?.length ? `:${tags[0]}: ` : "";
-  const titleStr = title ? `**${emoji}${title}**\n` : "";
-  await mmPost("dev-logs", `${titleStr}${message}`);
-}
 
-async function ntfyError(module: string, op: string, error: string, meta?: Record<string, any>) {
-  log("error", module, op, error, meta);
-  await mmAlert(module, op, error, meta);
-}
-
-
-// --- PG Pool (lazy init) ---
-
-let pool: pg.Pool | null = null;
-
-function getPool(): pg.Pool {
-  if (!pool) {
-    if (!POSTGRES_USER || !POSTGRES_PASSWORD || !POSTGRES_DB) {
-      throw new Error("PostgreSQL not configured - check POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB");
-    }
-    pool = new Pool({
-      host: POSTGRES_HOST,
-      port: POSTGRES_PORT,
-      user: POSTGRES_USER,
-      password: POSTGRES_PASSWORD,
-      database: POSTGRES_DB,
-    });
-  }
-  return pool;
-}
-
-async function pgQuery(sql: string, params: any[] = []): Promise<any> {
-  const client = await getPool().connect();
-  try {
-    return await client.query(sql, params);
-  } finally {
-    client.release();
-  }
-}
 
 // --- GitLab API helper (exported for use by projects.ts) ---
 
-export async function gitlabFetch(path: string, options: RequestInit = {}): Promise<any> {
+export async function gitlabFetch(path: string, options: RequestInit = {}, opts?: { quiet?: boolean }): Promise<any> {
   const startTime = Date.now();
   const method = (options.method || "GET").toUpperCase();
   log("info", "gitlab", "fetch", `${method} ${path}`);
@@ -99,7 +59,9 @@ export async function gitlabFetch(path: string, options: RequestInit = {}): Prom
     if (!res.ok) {
       const body = await res.text();
       const errMsg = `GitLab API ${res.status}: ${body.slice(0, 500)}`;
-      await ntfyError("gitlab", path, errMsg, { method, status: res.status, elapsed_ms: elapsed });
+      if (!opts?.quiet) {
+        await mmError("gitlab", path, errMsg, { method, status: res.status, elapsed_ms: elapsed });
+      }
       throw new Error(errMsg);
     }
 
@@ -112,7 +74,7 @@ export async function gitlabFetch(path: string, options: RequestInit = {}): Prom
   } catch (e: any) {
     if (!e.message.includes("GitLab API")) {
       const elapsed = Date.now() - startTime;
-      await ntfyError("gitlab", path, `GitLab fetch failed: ${e.message}`, { method, elapsed_ms: elapsed });
+      await mmError("gitlab", path, `GitLab fetch failed: ${e.message}`, { method, elapsed_ms: elapsed });
     }
     throw e;
   }
@@ -140,7 +102,7 @@ export async function ohFetch(path: string, options: RequestInit = {}): Promise<
     if (!res.ok) {
       const body = await res.text();
       const errMsg = `OpenHands API ${res.status}: ${body.slice(0, 500)}`;
-      await ntfyError("openhands", path, errMsg, { method, status: res.status, elapsed_ms: elapsed });
+      await mmError("openhands", path, errMsg, { method, status: res.status, elapsed_ms: elapsed });
       throw new Error(errMsg);
     }
 
@@ -153,7 +115,7 @@ export async function ohFetch(path: string, options: RequestInit = {}): Promise<
   } catch (e: any) {
     if (!e.message.includes("OpenHands API")) {
       const elapsed = Date.now() - startTime;
-      await ntfyError("openhands", path, `OpenHands fetch failed: ${e.message}`, { method, elapsed_ms: elapsed });
+      await mmError("openhands", path, `OpenHands fetch failed: ${e.message}`, { method, elapsed_ms: elapsed });
     }
     throw e;
   }
@@ -235,7 +197,7 @@ const tools: Record<string, {
       log("info", "workspace", "create", `Workspace created for ${slug}`, {
         gitlab_id: repoId, workspace_path: workspacePath,
       });
-      await ntfyNotify(
+      await mmNotify(
         `Workspace created: ${slug}\nGitLab: ${repoWebUrl}\nPath: ${workspacePath}`,
         "Workspace Created", 3, ["file_folder"]
       );
@@ -345,7 +307,7 @@ const tools: Record<string, {
       log("info", "session", "create", `Coding session created for ${p.slug} sprint #${p.sprint_number}`, {
         conversation_id: conversationId, workspace_id: ws.id, sprint_id: sprint.id, branch: body.selected_branch,
       });
-      await ntfyNotify(
+      await mmNotify(
         `Coding session started: ${p.slug} sprint #${p.sprint_number}\nConversation: ${conversationId}\nBranch: ${body.selected_branch}`,
         "Coding Session Started", 3, ["computer"]
       );
@@ -489,7 +451,7 @@ const tools: Record<string, {
       log("info", "merge", "sprint", `Sprint merged for ${p.slug}: ${p.source_branch} -> main`, {
         mr_iid: mr.iid, commit: merged.merge_commit_sha,
       });
-      await ntfyNotify(
+      await mmNotify(
         `Sprint merged: ${p.slug}\n${p.source_branch} -> main\nMR: ${mr.web_url}`,
         "Sprint Merged", 3, ["merged"]
       );
@@ -558,13 +520,13 @@ const tools: Record<string, {
         },
         tech_stack: techStack,
         container: {
-          image: `registry.your-domain.com/${ws.slug}:latest`,
+          image: `${GITLAB_REGISTRY_HOST}/${GITLAB_GROUP}/${ws.slug}:latest`,
           ports: [],
           env_vars: [],
           volumes: [],
         },
         traefik: {
-          host: `${ws.slug}.your-domain.com`,
+          host: `${ws.slug}.${PUBLIC_DOMAIN}`,
           entrypoint: "web",
         },
         build_history: {
@@ -578,7 +540,7 @@ const tools: Record<string, {
       log("info", "recipe", "generate", `Recipe generated for ${p.slug}`, {
         sprints: sprintRes.rowCount, tasks: taskRes.rowCount,
       });
-      await ntfyNotify(
+      await mmNotify(
         `Container recipe generated: ${ws.slug}\nSprints: ${sprintRes.rowCount}, Tasks completed: ${taskRes.rowCount}`,
         "Recipe Generated", 3, ["package"]
       );
@@ -653,11 +615,29 @@ export async function promoteCodeToProjectRepo(
     if (diff.deleted_file) {
       actions.push({ action: "delete", file_path: diff.new_path });
     } else {
-      // Fetch the raw file content from sandbox branch
-      const fileContent = await gitlabFetch(
-        `/api/v4/projects/${encodedSandbox}/repository/files/${encodeURIComponent(diff.new_path)}/raw?ref=${encodeURIComponent(sandboxBranch)}`
-      );
-      const content = typeof fileContent === "string" ? fileContent : JSON.stringify(fileContent);
+      // Detect binary files by extension or GitLab's binary flag
+      const BINARY_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".svg", ".woff", ".woff2", ".ttf", ".eot", ".otf", ".mp3", ".mp4", ".wav", ".ogg", ".webm", ".pdf", ".zip", ".tar", ".gz", ".wasm", ".avif"]);
+      const ext = (diff.new_path.match(/\.[^.]+$/) || [""])[0].toLowerCase();
+      const isBinary = diff.binary === true || BINARY_EXTS.has(ext);
+
+      let fileContent: string;
+      let fileEncoding: "text" | "base64";
+
+      if (isBinary) {
+        // Fetch base64-encoded content via file metadata API
+        const fileMeta = await gitlabFetch(
+          `/api/v4/projects/${encodedSandbox}/repository/files/${encodeURIComponent(diff.new_path)}?ref=${encodeURIComponent(sandboxBranch)}`
+        );
+        fileContent = fileMeta.content || "";
+        fileEncoding = "base64";
+      } else {
+        // Fetch raw text content
+        const rawContent = await gitlabFetch(
+          `/api/v4/projects/${encodedSandbox}/repository/files/${encodeURIComponent(diff.new_path)}/raw?ref=${encodeURIComponent(sandboxBranch)}`
+        );
+        fileContent = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent);
+        fileEncoding = "text";
+      }
 
       // Check if file exists in target repo to decide create vs update
       let fileExists = false;
@@ -675,8 +655,8 @@ export async function promoteCodeToProjectRepo(
       actions.push({
         action: fileExists ? "update" : "create",
         file_path: diff.new_path,
-        content,
-        encoding: "text",
+        content: fileContent,
+        encoding: fileEncoding,
       });
     }
   }
@@ -747,7 +727,7 @@ export function registerWorkspaceTools(server: McpServer) {
         log("error", "call", tool, `Tool failed: ${error.message}`);
         const criticalTools = ["create_workspace", "create_coding_session", "merge_sprint"];
         if (criticalTools.includes(tool)) {
-          await ntfyError("call", tool, `Workspace tool ${tool} failed: ${error.message}`, {
+          await mmError("call", tool, `Workspace tool ${tool} failed: ${error.message}`, {
             tool, params: Object.keys(params || {}),
           });
         }
