@@ -1,0 +1,700 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Howell Legacy Planning — Estate Plan Wizard (Mockup)</title>
+<style>
+  :root{
+    --bg:#fbfaf6;
+    --card:#ffffff;
+    --ink:#1a1a1a;
+    --muted:#6b6b6b;
+    --line:#e7e3d8;
+    --primary:#1e3a5f;
+    --primary-ink:#ffffff;
+    --accent:#b08d57;
+    --good:#2f7d4f;
+    --warn:#a14b1a;
+    --soft:#f3efe5;
+    --radius:10px;
+    --shadow:0 1px 2px rgba(0,0,0,.04), 0 8px 24px rgba(20,30,50,.06);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:var(--bg);color:var(--ink);
+    font:16px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .serif{font-family:"Iowan Old Style",Georgia,"Times New Roman",serif;letter-spacing:.2px}
+  header{background:var(--primary);color:var(--primary-ink);padding:14px 22px;display:flex;align-items:center;justify-content:space-between}
+  header .brand{font-family:"Iowan Old Style",Georgia,serif;font-size:18px;letter-spacing:.5px}
+  header .brand small{display:block;font-size:11px;opacity:.7;letter-spacing:1.2px;text-transform:uppercase;margin-top:2px}
+  header .meta{font-size:12px;opacity:.85}
+  .progress-wrap{background:#fff;border-bottom:1px solid var(--line);padding:14px 22px;position:sticky;top:0;z-index:5}
+  .progress-row{display:flex;align-items:center;gap:14px;max-width:980px;margin:0 auto}
+  .progress-bar{flex:1;height:6px;background:var(--soft);border-radius:99px;overflow:hidden}
+  .progress-fill{height:100%;background:var(--accent);width:0%;transition:width .35s ease}
+  .progress-text{font-size:13px;color:var(--muted);white-space:nowrap}
+  .saved-pill{font-size:11px;color:var(--good);background:#eaf3ec;border:1px solid #cfe3d4;padding:3px 8px;border-radius:99px}
+  main{max-width:760px;margin:28px auto 100px;padding:0 22px}
+  .stepcrumb{font-size:12px;letter-spacing:1.4px;text-transform:uppercase;color:var(--accent);font-weight:600;margin-bottom:8px}
+  h1{font-size:30px;line-height:1.2;margin:0 0 8px}
+  .lede{color:var(--muted);margin:0 0 24px;font-size:16px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:22px;box-shadow:var(--shadow);margin-bottom:18px}
+  .field{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+  .field label{font-size:13px;font-weight:600;color:#2a2a2a}
+  .field .hint{font-size:12px;color:var(--muted)}
+  .row{display:grid;gap:12px;grid-template-columns:1fr 1fr}
+  .row3{display:grid;gap:12px;grid-template-columns:2fr 1fr 1fr}
+  @media(max-width:600px){.row,.row3{grid-template-columns:1fr}}
+  input[type=text],input[type=email],input[type=tel],input[type=date],input[type=number],select,textarea{
+    font:inherit;color:inherit;background:#fff;border:1px solid var(--line);border-radius:8px;
+    padding:10px 12px;width:100%;outline:none;transition:border-color .15s, box-shadow .15s}
+  input:focus,select:focus,textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(30,58,95,.12)}
+  textarea{min-height:80px;resize:vertical}
+  .choice{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .choice .opt{border:1px solid var(--line);background:#fff;border-radius:8px;padding:14px;cursor:pointer;text-align:left;transition:all .15s}
+  .choice .opt:hover{border-color:#c9bfa3}
+  .choice .opt.sel{border-color:var(--primary);background:#f4f7fb;box-shadow:0 0 0 2px rgba(30,58,95,.08)}
+  .choice .opt b{display:block;margin-bottom:2px}
+  .choice .opt span{font-size:12px;color:var(--muted)}
+  .stack{display:flex;flex-direction:column;gap:10px}
+  .stack .opt{display:flex;align-items:flex-start;gap:10px;border:1px solid var(--line);background:#fff;padding:12px 14px;border-radius:8px;cursor:pointer}
+  .stack .opt:hover{border-color:#c9bfa3}
+  .stack .opt.sel{border-color:var(--primary);background:#f4f7fb}
+  .stack .opt input{margin-top:3px}
+  .help-link{display:inline-flex;align-items:center;gap:6px;background:none;border:0;color:var(--primary);font-size:12px;cursor:pointer;padding:0;margin-left:6px}
+  .help-link:hover{text-decoration:underline}
+  .item{border:1px solid var(--line);border-radius:8px;padding:14px;margin-bottom:10px;background:#fff;position:relative}
+  .item h4{margin:0 0 10px;font-size:14px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+  .item .remove{position:absolute;top:10px;right:12px;background:none;border:0;color:var(--warn);font-size:12px;cursor:pointer}
+  .add-btn{background:#fff;border:1px dashed #c9bfa3;color:var(--primary);padding:10px;width:100%;border-radius:8px;cursor:pointer;font-weight:600}
+  .add-btn:hover{background:var(--soft)}
+  .nav{display:flex;justify-content:space-between;gap:10px;margin-top:24px}
+  button.primary{background:var(--primary);color:#fff;border:0;padding:12px 22px;border-radius:8px;font-weight:600;font-size:15px;cursor:pointer}
+  button.primary:hover{background:#16304d}
+  button.ghost{background:transparent;color:var(--primary);border:1px solid var(--line);padding:12px 18px;border-radius:8px;font-weight:600;cursor:pointer}
+  button.ghost:hover{background:var(--soft)}
+  .pct{display:flex;align-items:center;gap:6px}
+  .pct input{width:80px}
+  .pct-total{font-size:12px;color:var(--muted);margin-top:6px}
+  .pct-total.bad{color:var(--warn)}
+  .pct-total.ok{color:var(--good)}
+  .review-grid{display:grid;grid-template-columns:1fr 2fr auto;gap:8px 16px;align-items:baseline}
+  .review-grid .k{color:var(--muted);font-size:13px}
+  .review-grid .v{font-size:14px}
+  .review-grid .edit{background:none;border:0;color:var(--primary);font-size:12px;cursor:pointer}
+  .review-section{padding:18px;border:1px solid var(--line);border-radius:8px;margin-bottom:12px;background:#fff}
+  .review-section h3{margin:0 0 12px;font-size:15px;display:flex;justify-content:space-between;align-items:center}
+  .badge{font-size:11px;color:var(--accent);border:1px solid #e0d3b3;background:#faf5e9;padding:2px 8px;border-radius:99px;letter-spacing:.5px;text-transform:uppercase}
+  .stepper{display:flex;gap:6px;margin:0 0 24px;flex-wrap:wrap}
+  .stepper .dot{font-size:11px;color:var(--muted);padding:3px 9px;border-radius:99px;background:var(--soft);border:1px solid transparent}
+  .stepper .dot.active{background:var(--primary);color:#fff}
+  .stepper .dot.done{background:#fff;border-color:var(--accent);color:var(--accent)}
+  .toast{position:fixed;left:50%;bottom:30px;transform:translateX(-50%) translateY(80px);background:#1a1a1a;color:#fff;padding:10px 16px;border-radius:8px;font-size:13px;opacity:0;transition:all .3s;pointer-events:none;z-index:30}
+  .toast.show{transform:translateX(-50%) translateY(0);opacity:.96}
+
+  /* help drawer */
+  .drawer-mask{position:fixed;inset:0;background:rgba(20,30,50,.35);opacity:0;pointer-events:none;transition:opacity .2s;z-index:20}
+  .drawer-mask.show{opacity:1;pointer-events:auto}
+  .drawer{position:fixed;top:0;right:0;height:100%;width:min(420px,90vw);background:#fff;box-shadow:-12px 0 30px rgba(0,0,0,.12);transform:translateX(100%);transition:transform .25s ease;z-index:21;padding:24px 24px 30px;overflow:auto}
+  .drawer.show{transform:translateX(0)}
+  .drawer header{background:transparent;color:var(--ink);padding:0 0 12px;border-bottom:1px solid var(--line);margin-bottom:14px}
+  .drawer h2{margin:0;font-size:20px;font-family:"Iowan Old Style",Georgia,serif}
+  .drawer .close{background:none;border:0;color:var(--muted);font-size:22px;cursor:pointer;line-height:1}
+  .drawer p{color:#333}
+  .drawer .ex{background:var(--soft);border-radius:8px;padding:12px;font-size:14px;color:#3b3b3b;margin-top:10px}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">Howell Legacy Planning<small>Estate Plan Intake</small></div>
+  <div class="meta">Secure · Auto-saved on your device</div>
+</header>
+
+<div class="progress-wrap">
+  <div class="progress-row">
+    <div class="progress-text" id="progressLabel">Step 1 of 12</div>
+    <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+    <div class="saved-pill" id="savedPill">Saved</div>
+  </div>
+</div>
+
+<main id="app"></main>
+
+<div class="drawer-mask" id="drawerMask"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <header>
+    <div style="display:flex;justify-content:space-between;align-items:center;width:100%">
+      <h2 id="drawerTitle">Help</h2>
+      <button class="close" id="drawerClose" aria-label="Close help">×</button>
+    </div>
+  </header>
+  <div id="drawerBody"></div>
+</aside>
+
+<div class="toast" id="toast">Saved</div>
+
+<script>
+/* ---------- state ---------- */
+const STORAGE_KEY = "swt-wizard-mockup-v1";
+const state = Object.assign({
+  step: 0,
+  client: { firstName:"", middleName:"", lastName:"", email:"", phone:"", dob:"", address:"", city:"", state:"TX", zip:"" },
+  marital: "",                 // single | married | divorced | widowed
+  spouse: { firstName:"", lastName:"", dob:"", marriageDate:"", marriageLocation:"" },
+  hasMinorChildren: "",        // "yes" | "no"
+  family: [],                  // {relationship, name, dob}
+  primaryBens: [],             // {name, relationship, percentage}
+  contingentBens: [],
+  primaryDistribution: "",
+  bequests: [],                // {item, recipient}
+  executor: { name:"", relationship:"", phone:"" },
+  altExecutor: { name:"", relationship:"", phone:"" },
+  needsTrustee: "",
+  trustee: { name:"", relationship:"", phone:"" },
+  guardian: { name:"", relationship:"", phone:"" },
+  altGuardian: { name:"", relationship:"", phone:"" },
+  needsMedicalPOA:"yes", needsFinancialPOA:"yes", needsDirective:"yes", needsHIPAA:"yes",
+  medAgent:{name:"",phone:""}, finAgent:{name:"",phone:""},
+  lifeSustaining:"", organDonation:""
+}, JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"));
+
+function save(){ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); flashSaved(); }
+let saveT;
+function flashSaved(){
+  const p = document.getElementById("savedPill");
+  p.textContent = "Saving…"; p.style.color = "#a14b1a";
+  clearTimeout(saveT);
+  saveT = setTimeout(()=>{ p.textContent="Saved"; p.style.color=""; },300);
+}
+function toast(msg){
+  const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show");
+  setTimeout(()=>t.classList.remove("show"),1400);
+}
+
+/* ---------- step pipeline (with skip logic) ---------- */
+function buildSteps(){
+  const s = [
+    {id:"welcome", title:"Welcome", crumb:"Getting started", render:renderWelcome},
+    {id:"about",   title:"About you", crumb:"Step 1 — Family", render:renderAbout},
+    {id:"marital", title:"Marital status", crumb:"Step 1 — Family", render:renderMarital},
+  ];
+  if (state.marital === "married") s.push({id:"spouse",title:"About your spouse",crumb:"Step 1 — Family",render:renderSpouse});
+  s.push({id:"children", title:"Children & family", crumb:"Step 1 — Family", render:renderFamily});
+  s.push({id:"primary",  title:"Who inherits?", crumb:"Step 2 — Beneficiaries", render:renderPrimaryBens});
+  s.push({id:"distribution", title:"How is it divided?", crumb:"Step 2 — Beneficiaries", render:renderDistribution});
+  s.push({id:"bequests",  title:"Specific gifts", crumb:"Step 2 — Beneficiaries", render:renderBequests});
+  s.push({id:"executor",  title:"Who manages your estate?", crumb:"Step 3 — Fiduciaries", render:renderExecutor});
+  if (state.hasMinorChildren === "yes")
+    s.push({id:"guardian", title:"Guardian for your children", crumb:"Step 3 — Fiduciaries", render:renderGuardian});
+  s.push({id:"directives", title:"Healthcare & POA", crumb:"Step 4 — Ancillary", render:renderDirectives});
+  if (state.needsMedicalPOA === "yes" || state.needsFinancialPOA === "yes")
+    s.push({id:"agents", title:"Your agents", crumb:"Step 4 — Ancillary", render:renderAgents});
+  s.push({id:"review", title:"Review your plan", crumb:"Almost done", render:renderReview});
+  s.push({id:"done", title:"Submitted", crumb:"Complete", render:renderDone});
+  return s;
+}
+
+/* ---------- helpers ---------- */
+function bind(path, el, opt={}){
+  // path like "client.firstName"
+  const parts = path.split(".");
+  let cur = state; for (let i=0;i<parts.length-1;i++) cur = cur[parts[i]];
+  el.value = cur[parts.at(-1)] ?? "";
+  el.addEventListener("input", e=>{
+    cur[parts.at(-1)] = el.value;
+    save();
+    if (opt.rerender) render();
+  });
+}
+function field(label, path, type="text", placeholder="", help){
+  const f = document.createElement("div"); f.className="field";
+  f.innerHTML = `<label>${label}${help?` <button class="help-link" data-help="${help}">ⓘ Explain</button>`:""}</label>`;
+  const inp = document.createElement(type==="textarea"?"textarea":"input");
+  if (type!=="textarea") inp.type=type;
+  if (placeholder) inp.placeholder=placeholder;
+  f.appendChild(inp);
+  bind(path, inp);
+  return f;
+}
+function choices(label, path, opts, layout="choice", onChange){
+  const wrap = document.createElement("div"); wrap.className="field";
+  wrap.innerHTML = `<label>${label}</label>`;
+  const grid = document.createElement("div"); grid.className=layout;
+  opts.forEach(o=>{
+    const b = document.createElement("button");
+    b.type="button"; b.className="opt"+(getPath(path)===o.value?" sel":"");
+    b.innerHTML = `<b>${o.label}</b>${o.hint?`<span>${o.hint}</span>`:""}`;
+    b.onclick=()=>{ setPath(path,o.value); save(); if(onChange) onChange(); render(); };
+    grid.appendChild(b);
+  });
+  wrap.appendChild(grid);
+  return wrap;
+}
+function getPath(p){ return p.split(".").reduce((a,k)=>a?.[k], state); }
+function setPath(p,v){ const ks=p.split("."); let c=state; for(let i=0;i<ks.length-1;i++) c=c[ks[i]]; c[ks.at(-1)]=v; }
+
+/* ---------- step renderers ---------- */
+function renderWelcome(){
+  const root = document.createElement("div");
+  root.innerHTML = `
+    <div class="stepcrumb">Getting started</div>
+    <h1 class="serif">Let's build your Texas estate plan.</h1>
+    <p class="lede">We'll walk through four areas — your family, who inherits, who manages your estate, and your healthcare wishes. Most people finish in 20–30 minutes. Your answers save automatically.</p>
+    <div class="card">
+      <div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:12px"><div style="font-size:22px">1.</div><div><b class="serif">Family</b><div style="color:var(--muted);font-size:14px">You, your spouse if any, and children.</div></div></div>
+      <div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:12px"><div style="font-size:22px">2.</div><div><b class="serif">Beneficiaries</b><div style="color:var(--muted);font-size:14px">Who receives your property and how it's divided.</div></div></div>
+      <div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:12px"><div style="font-size:22px">3.</div><div><b class="serif">Fiduciaries</b><div style="color:var(--muted);font-size:14px">Executor, trustee, and guardian for minor children.</div></div></div>
+      <div style="display:flex;gap:14px;align-items:flex-start"><div style="font-size:22px">4.</div><div><b class="serif">Healthcare & POA</b><div style="color:var(--muted);font-size:14px">Medical and financial decision-making authority.</div></div></div>
+    </div>
+  `;
+  return root;
+}
+function renderAbout(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 1 — About you</div><h1 class="serif">Tell us about yourself.</h1><p class="lede">This is the person whose estate plan we're preparing.</p>`;
+  const card = document.createElement("div"); card.className="card";
+  const row1 = document.createElement("div"); row1.className="row3";
+  row1.append(field("First name","client.firstName"), field("Middle","client.middleName"), field("Last name","client.lastName"));
+  card.append(row1);
+  const row2 = document.createElement("div"); row2.className="row";
+  row2.append(field("Email","client.email","email"), field("Phone","client.phone","tel","(713) 555-0100"));
+  card.append(row2, field("Date of birth","client.dob","date"));
+  const row3 = document.createElement("div"); row3.className="row3";
+  row3.append(field("Street address","client.address"), field("City","client.city"), field("ZIP","client.zip"));
+  card.append(row3);
+  r.append(card);
+  return r;
+}
+function renderMarital(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 1 — About you</div><h1 class="serif">What's your marital status?</h1><p class="lede">Texas community-property rules can change how your estate is distributed.<button class="help-link" data-help="community">ⓘ What does that mean?</button></p>`;
+  const card = document.createElement("div"); card.className="card";
+  card.append(choices("Marital status","marital",[
+    {value:"single",label:"Single",hint:"Never married"},
+    {value:"married",label:"Married",hint:"Including common-law"},
+    {value:"divorced",label:"Divorced",hint:"Marriage ended"},
+    {value:"widowed",label:"Widowed",hint:"Spouse passed away"}
+  ]));
+  card.append(choices("Do you have minor children (under 18)?","hasMinorChildren",[
+    {value:"yes",label:"Yes",hint:"We'll ask about a guardian"},
+    {value:"no",label:"No",hint:""}
+  ]));
+  r.append(card);
+  return r;
+}
+function renderSpouse(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 1 — Spouse</div><h1 class="serif">About your spouse.</h1><p class="lede">We'll use this to coordinate community-property and survivorship provisions.</p>`;
+  const card = document.createElement("div"); card.className="card";
+  const row = document.createElement("div"); row.className="row";
+  row.append(field("Spouse first name","spouse.firstName"), field("Spouse last name","spouse.lastName"));
+  card.append(row, field("Spouse date of birth","spouse.dob","date"));
+  const row2 = document.createElement("div"); row2.className="row";
+  row2.append(field("Date of marriage","spouse.marriageDate","date"), field("Where were you married?","spouse.marriageLocation","text","Houston, TX"));
+  card.append(row2);
+  r.append(card);
+  return r;
+}
+function renderFamily(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 1 — Family</div><h1 class="serif">Children and other family.</h1><p class="lede">Add anyone who may be relevant to your plan — even if they aren't a beneficiary.</p>`;
+  const card = document.createElement("div"); card.className="card";
+  state.family.forEach((m,idx)=>{
+    const it = document.createElement("div"); it.className="item";
+    it.innerHTML = `<button class="remove" data-rm="family.${idx}">Remove</button><h4>Family member ${idx+1}</h4>`;
+    const row = document.createElement("div"); row.className="row";
+    const rel = document.createElement("select");
+    ["","Son","Daughter","Stepchild","Grandson","Granddaughter","Sibling","Parent","Dependent","Other"].forEach(o=>{
+      const op=document.createElement("option"); op.value=o.toLowerCase(); op.textContent=o||"Select relationship..."; rel.appendChild(op);
+    });
+    rel.value = m.relationship||"";
+    rel.onchange = e=>{ m.relationship=rel.value; save(); };
+    const relF = document.createElement("div"); relF.className="field";
+    relF.innerHTML="<label>Relationship</label>"; relF.appendChild(rel);
+    const nameF = document.createElement("div"); nameF.className="field";
+    nameF.innerHTML="<label>Full name</label>";
+    const nm = document.createElement("input"); nm.type="text"; nm.value=m.name||"";
+    nm.oninput = ()=>{ m.name=nm.value; save(); };
+    nameF.appendChild(nm);
+    row.append(relF, nameF);
+    const dobF = document.createElement("div"); dobF.className="field";
+    dobF.innerHTML="<label>Date of birth</label>";
+    const dob = document.createElement("input"); dob.type="date"; dob.value=m.dob||"";
+    dob.oninput = ()=>{ m.dob=dob.value; save(); };
+    dobF.appendChild(dob);
+    it.append(row, dobF);
+    card.appendChild(it);
+  });
+  const add = document.createElement("button"); add.className="add-btn";
+  add.textContent = state.family.length ? "+ Add another family member" : "+ Add a family member";
+  add.onclick = ()=>{ state.family.push({relationship:"",name:"",dob:""}); save(); render(); };
+  card.appendChild(add);
+  r.append(card);
+  return r;
+}
+function renderPrimaryBens(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 2 — Beneficiaries</div><h1 class="serif">Who inherits your estate?</h1><p class="lede">List the people or organizations who should receive your property. We'll handle the percentages on the next screen.</p>`;
+  const card = document.createElement("div"); card.className="card";
+  if (!state.primaryBens.length) state.primaryBens.push({name:"",relationship:"",percentage:""});
+  state.primaryBens.forEach((b,idx)=>{
+    const it = document.createElement("div"); it.className="item";
+    it.innerHTML = `<button class="remove" data-rm="primaryBens.${idx}">Remove</button><h4>Beneficiary ${idx+1}</h4>`;
+    const row = document.createElement("div"); row.className="row";
+    const fName = document.createElement("div"); fName.className="field";
+    fName.innerHTML="<label>Full name</label>";
+    const inp = document.createElement("input"); inp.type="text"; inp.value=b.name||"";
+    inp.oninput=()=>{b.name=inp.value;save();};
+    fName.append(inp);
+    const fRel = document.createElement("div"); fRel.className="field";
+    fRel.innerHTML="<label>Relationship</label>";
+    const rel = document.createElement("input"); rel.type="text"; rel.value=b.relationship||""; rel.placeholder="e.g. Daughter";
+    rel.oninput=()=>{b.relationship=rel.value;save();};
+    fRel.append(rel);
+    row.append(fName, fRel);
+    it.append(row);
+    card.appendChild(it);
+  });
+  const add = document.createElement("button"); add.className="add-btn";
+  add.textContent="+ Add another beneficiary";
+  add.onclick=()=>{ state.primaryBens.push({name:"",relationship:"",percentage:""}); save(); render(); };
+  card.append(add);
+  r.append(card);
+  return r;
+}
+function renderDistribution(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 2 — Beneficiaries</div><h1 class="serif">How should your estate be divided?</h1><p class="lede">Pick a method, or set custom percentages below.</p>`;
+  const card = document.createElement("div"); card.className="card";
+  card.append(choices("Distribution method","primaryDistribution",[
+    {value:"equal",label:"Equal shares",hint:"Split evenly between beneficiaries"},
+    {value:"perstirpes",label:"Per stirpes",hint:"By family branch"},
+    {value:"percapita",label:"Per capita",hint:"Equally among survivors"},
+    {value:"custom",label:"Custom %",hint:"Set each share below"}
+  ],"choice"));
+  // attach help to "Per stirpes" label after render
+  const labels = card.querySelectorAll(".opt b");
+  labels.forEach(b=>{
+    if(b.textContent==="Per stirpes"){
+      const btn = document.createElement("button"); btn.className="help-link"; btn.dataset.help="perstirpes"; btn.innerHTML="ⓘ Explain"; btn.onclick=(e)=>{e.stopPropagation();openHelp("perstirpes");};
+      b.parentElement.appendChild(btn);
+    }
+  });
+
+  // custom percentages
+  if (state.primaryDistribution === "custom" && state.primaryBens.length){
+    const wrap = document.createElement("div"); wrap.style.marginTop="14px";
+    let total = 0;
+    state.primaryBens.forEach((b,idx)=>{
+      const row = document.createElement("div"); row.className="field";
+      row.innerHTML = `<label>${b.name||"Beneficiary "+(idx+1)} — share</label>`;
+      const pc = document.createElement("div"); pc.className="pct";
+      const inp = document.createElement("input"); inp.type="number"; inp.min="0"; inp.max="100"; inp.value=b.percentage||"";
+      inp.oninput = ()=>{ b.percentage=inp.value; save(); render(); };
+      pc.append(inp);
+      const pct = document.createElement("span"); pct.textContent="%";
+      pc.append(pct);
+      row.append(pc);
+      wrap.append(row);
+      total += Number(b.percentage||0);
+    });
+    const t = document.createElement("div"); t.className="pct-total "+(total===100?"ok":"bad");
+    t.textContent = `Total: ${total}% ${total===100?"✓":"(must equal 100%)"}`;
+    wrap.append(t);
+    card.append(wrap);
+  }
+  r.append(card);
+  return r;
+}
+function renderBequests(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 2 — Beneficiaries</div><h1 class="serif">Specific gifts (optional).</h1><p class="lede">Want a particular item — jewelry, a vehicle, a family heirloom — to go to a specific person? Add them here. Otherwise click Continue.</p>`;
+  const card = document.createElement("div"); card.className="card";
+  state.bequests.forEach((g,idx)=>{
+    const it = document.createElement("div"); it.className="item";
+    it.innerHTML = `<button class="remove" data-rm="bequests.${idx}">Remove</button><h4>Gift ${idx+1}</h4>`;
+    const row = document.createElement("div"); row.className="row";
+    const fI = document.createElement("div"); fI.className="field";
+    fI.innerHTML="<label>Item or property</label>";
+    const i1 = document.createElement("input"); i1.type="text"; i1.value=g.item||""; i1.placeholder="e.g. 1969 Mustang";
+    i1.oninput=()=>{g.item=i1.value;save();}; fI.append(i1);
+    const fR = document.createElement("div"); fR.className="field";
+    fR.innerHTML="<label>Recipient name</label>";
+    const i2 = document.createElement("input"); i2.type="text"; i2.value=g.recipient||"";
+    i2.oninput=()=>{g.recipient=i2.value;save();}; fR.append(i2);
+    row.append(fI, fR);
+    it.append(row);
+    card.appendChild(it);
+  });
+  const add = document.createElement("button"); add.className="add-btn";
+  add.textContent = state.bequests.length ? "+ Add another specific gift" : "+ Add a specific gift";
+  add.onclick=()=>{ state.bequests.push({item:"",recipient:""}); save(); render(); };
+  card.append(add);
+  r.append(card);
+  return r;
+}
+function renderExecutor(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 3 — Fiduciaries</div><h1 class="serif">Who manages your estate?</h1><p class="lede">Your <b>executor</b> handles paperwork, pays debts, and distributes assets. Choose someone organized and trustworthy. <button class="help-link" data-help="executor">ⓘ What does an executor do?</button></p>`;
+  const card = document.createElement("div"); card.className="card";
+  card.innerHTML += "<h3 class='serif' style='margin:0 0 12px'>Primary executor</h3>";
+  const row = document.createElement("div"); row.className="row";
+  row.append(field("Full name","executor.name"), field("Relationship","executor.relationship"));
+  card.append(row, field("Phone","executor.phone","tel"));
+  const card2 = document.createElement("div"); card2.className="card";
+  card2.innerHTML = "<h3 class='serif' style='margin:0 0 4px'>Alternate executor</h3><p class='lede' style='margin-top:0'>If your primary can't serve.</p>";
+  const row2 = document.createElement("div"); row2.className="row";
+  row2.append(field("Full name","altExecutor.name"), field("Relationship","altExecutor.relationship"));
+  card2.append(row2, field("Phone","altExecutor.phone","tel"));
+  r.append(card, card2);
+  return r;
+}
+function renderGuardian(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 3 — Fiduciaries</div><h1 class="serif">Guardian for your minor children.</h1><p class="lede">If both parents pass away, who should raise your children?</p>`;
+  const c1 = document.createElement("div"); c1.className="card";
+  c1.innerHTML = "<h3 class='serif' style='margin:0 0 12px'>Primary guardian</h3>";
+  const r1 = document.createElement("div"); r1.className="row";
+  r1.append(field("Full name","guardian.name"), field("Relationship","guardian.relationship"));
+  c1.append(r1, field("Phone","guardian.phone","tel"));
+  const c2 = document.createElement("div"); c2.className="card";
+  c2.innerHTML = "<h3 class='serif' style='margin:0 0 12px'>Alternate guardian</h3>";
+  const r2 = document.createElement("div"); r2.className="row";
+  r2.append(field("Full name","altGuardian.name"), field("Relationship","altGuardian.relationship"));
+  c2.append(r2, field("Phone","altGuardian.phone","tel"));
+  r.append(c1, c2);
+  return r;
+}
+function renderDirectives(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 4 — Healthcare & POA</div><h1 class="serif">What documents would you like?</h1><p class="lede">A complete plan usually includes all four. Uncheck anything you'd rather discuss with the attorney.</p>`;
+  const card = document.createElement("div"); card.className="card stack";
+  const items = [
+    {key:"needsMedicalPOA",title:"Medical Power of Attorney",sub:"Lets someone make medical decisions if you can't."},
+    {key:"needsFinancialPOA",title:"Financial Power of Attorney",sub:"Lets someone manage finances on your behalf."},
+    {key:"needsDirective",title:"Directive to Physicians (Living Will)",sub:"States your wishes for life-sustaining treatment."},
+    {key:"needsHIPAA",title:"HIPAA Authorization",sub:"Allows named people to access your medical records."}
+  ];
+  items.forEach(it=>{
+    const opt = document.createElement("button"); opt.type="button"; opt.className="opt"+(state[it.key]==="yes"?" sel":"");
+    opt.style.display="flex"; opt.style.gap="12px"; opt.style.alignItems="flex-start"; opt.style.textAlign="left"; opt.style.width="100%";
+    opt.innerHTML = `<input type="checkbox" ${state[it.key]==="yes"?"checked":""} style="margin-top:3px;pointer-events:none"><div><b>${it.title}</b><div style="font-size:13px;color:var(--muted)">${it.sub}</div></div>`;
+    opt.onclick = ()=>{ state[it.key] = state[it.key]==="yes" ? "no" : "yes"; save(); render(); };
+    card.append(opt);
+  });
+  r.append(card);
+  if (state.needsDirective==="yes"){
+    const c2 = document.createElement("div"); c2.className="card";
+    c2.innerHTML = "<h3 class='serif' style='margin:0 0 4px'>Living will preferences</h3><p class='lede' style='margin-top:0'>You can change these later when reviewing with the attorney.</p>";
+    c2.append(choices("Life-sustaining treatment","lifeSustaining",[
+      {value:"provide",label:"Provide all treatment"},
+      {value:"withhold",label:"Withhold if terminal"},
+      {value:"discuss",label:"Discuss later"}
+    ],"stack"));
+    c2.append(choices("Organ donation","organDonation",[
+      {value:"all",label:"Donate all usable organs"},
+      {value:"none",label:"No donation"},
+      {value:"discuss",label:"Discuss later"}
+    ],"stack"));
+    r.append(c2);
+  }
+  return r;
+}
+function renderAgents(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Step 4 — Agents</div><h1 class="serif">Who should make decisions for you?</h1><p class="lede">These can be the same person or different people.</p>`;
+  if (state.needsMedicalPOA==="yes"){
+    const c = document.createElement("div"); c.className="card";
+    c.innerHTML = "<h3 class='serif' style='margin:0 0 12px'>Medical agent</h3>";
+    const row = document.createElement("div"); row.className="row";
+    row.append(field("Full name","medAgent.name"), field("Phone","medAgent.phone","tel"));
+    c.append(row);
+    r.append(c);
+  }
+  if (state.needsFinancialPOA==="yes"){
+    const c = document.createElement("div"); c.className="card";
+    c.innerHTML = "<h3 class='serif' style='margin:0 0 12px'>Financial agent</h3>";
+    const row = document.createElement("div"); row.className="row";
+    row.append(field("Full name","finAgent.name"), field("Phone","finAgent.phone","tel"));
+    c.append(row);
+    r.append(c);
+  }
+  return r;
+}
+function renderReview(){
+  const r = document.createElement("div");
+  r.innerHTML = `<div class="stepcrumb">Almost done</div><h1 class="serif">Review your estate plan.</h1><p class="lede">Double-check anything below. Click <i>Edit</i> to jump back. Nothing has been submitted yet.</p>`;
+  const sections = [
+    {h:"You", goto:"about", rows:[
+      ["Name", `${state.client.firstName} ${state.client.middleName} ${state.client.lastName}`.trim() || "—"],
+      ["Email/Phone", [state.client.email, state.client.phone].filter(Boolean).join(" · ") || "—"],
+      ["Address", [state.client.address, state.client.city, state.client.state, state.client.zip].filter(Boolean).join(", ") || "—"]
+    ]},
+    {h:"Marital status", goto:"marital", rows:[
+      ["Status", state.marital||"—"],
+      ["Minor children", state.hasMinorChildren||"—"]
+    ]}
+  ];
+  if (state.marital==="married") sections.push({h:"Spouse", goto:"spouse", rows:[
+    ["Name", `${state.spouse.firstName} ${state.spouse.lastName}`.trim()||"—"],
+    ["Married on", state.spouse.marriageDate||"—"]
+  ]});
+  sections.push({h:"Family", goto:"children", rows:[
+    ["Members", state.family.length ? state.family.map(f=>`${f.name||"(unnamed)"} (${f.relationship||"?"})`).join(", ") : "—"]
+  ]});
+  sections.push({h:"Beneficiaries", goto:"primary", rows:[
+    ["Primary", state.primaryBens.filter(b=>b.name).map(b=>`${b.name} (${b.relationship||"?"})${b.percentage?" — "+b.percentage+"%":""}`).join(", ") || "—"],
+    ["Distribution", state.primaryDistribution||"—"]
+  ]});
+  if (state.bequests.length) sections.push({h:"Specific gifts", goto:"bequests", rows:
+    state.bequests.filter(g=>g.item||g.recipient).map(g=>[g.item||"(item)", `to ${g.recipient||"(recipient)"}`])
+  });
+  sections.push({h:"Executor", goto:"executor", rows:[
+    ["Primary", state.executor.name||"—"], ["Alternate", state.altExecutor.name||"—"]
+  ]});
+  if (state.hasMinorChildren==="yes") sections.push({h:"Guardian", goto:"guardian", rows:[
+    ["Primary", state.guardian.name||"—"], ["Alternate", state.altGuardian.name||"—"]
+  ]});
+  sections.push({h:"Healthcare & POA", goto:"directives", rows:[
+    ["Medical POA", state.needsMedicalPOA==="yes" ? (state.medAgent.name||"yes") : "no"],
+    ["Financial POA", state.needsFinancialPOA==="yes" ? (state.finAgent.name||"yes") : "no"],
+    ["Living will", state.needsDirective==="yes" ? "yes" : "no"],
+    ["HIPAA", state.needsHIPAA==="yes" ? "yes" : "no"]
+  ]});
+
+  sections.forEach(s=>{
+    const sec = document.createElement("div"); sec.className="review-section";
+    sec.innerHTML = `<h3>${s.h} <button class="edit" data-goto="${s.goto}">Edit</button></h3>`;
+    const grid = document.createElement("div"); grid.className="review-grid";
+    s.rows.forEach(([k,v])=>{
+      const kEl = document.createElement("div"); kEl.className="k"; kEl.textContent=k;
+      const vEl = document.createElement("div"); vEl.className="v"; vEl.textContent=v;
+      grid.append(kEl, vEl, document.createElement("div"));
+    });
+    sec.append(grid);
+    r.append(sec);
+  });
+
+  // checks
+  const issues = [];
+  if (state.primaryDistribution==="custom"){
+    const t = state.primaryBens.reduce((a,b)=>a+Number(b.percentage||0),0);
+    if (t!==100) issues.push(`Beneficiary percentages total ${t}%, must equal 100%.`);
+  }
+  if (state.executor.name && state.primaryBens.some(b=>b.name && b.name===state.executor.name) && state.primaryBens.length===1)
+    issues.push(`${state.executor.name} is your only beneficiary AND your executor — usually fine, but flag for attorney review.`);
+  if (issues.length){
+    const w = document.createElement("div"); w.className="card"; w.style.borderColor="#e7caaf"; w.style.background="#fdf6ec";
+    w.innerHTML = `<b style="color:#a14b1a">A few things to confirm</b><ul style="margin:8px 0 0;padding-left:18px;color:#5a3010">${issues.map(i=>`<li>${i}</li>`).join("")}</ul>`;
+    r.append(w);
+  }
+  return r;
+}
+function renderDone(){
+  const r = document.createElement("div");
+  r.innerHTML = `
+    <div class="stepcrumb">Submitted</div>
+    <h1 class="serif">Thank you — your intake is complete.</h1>
+    <p class="lede">A copy has been sent to Gary Howell's office. You'll hear from us within one business day to schedule your review.</p>
+    <div class="card">
+      <b class="serif">What happens next</b>
+      <ol style="margin:10px 0 0;padding-left:20px;color:#333">
+        <li>Attorney reviews your responses (1 business day).</li>
+        <li>Draft documents prepared for your review.</li>
+        <li>Signing appointment scheduled — virtual or in-office.</li>
+      </ol>
+    </div>
+    <div class="card" style="text-align:center">
+      <p style="margin:0 0 12px;color:var(--muted)">Want to start over to demo the wizard again?</p>
+      <button class="ghost" id="resetBtn">Reset mockup</button>
+    </div>
+  `;
+  return r;
+}
+
+/* ---------- main render ---------- */
+function render(){
+  const steps = buildSteps();
+  if (state.step >= steps.length) state.step = steps.length-1;
+  const cur = steps[state.step];
+  const app = document.getElementById("app");
+  app.innerHTML = "";
+
+  // top stepper
+  const sp = document.createElement("div"); sp.className="stepper";
+  steps.forEach((s,i)=>{
+    const d = document.createElement("button"); d.className="dot"+(i===state.step?" active":"")+(i<state.step?" done":"");
+    d.style.cursor = "pointer"; d.style.border="0"; d.textContent = (i+1);
+    d.onclick = ()=>{ state.step=i; save(); render(); window.scrollTo({top:0,behavior:"smooth"}); };
+    sp.append(d);
+  });
+  app.append(sp);
+
+  app.append(cur.render());
+
+  // nav
+  if (cur.id !== "done"){
+    const nav = document.createElement("div"); nav.className="nav";
+    const back = document.createElement("button"); back.className="ghost"; back.textContent="← Back";
+    back.disabled = state.step===0;
+    if (state.step===0) back.style.visibility="hidden";
+    back.onclick = ()=>{ state.step=Math.max(0,state.step-1); save(); render(); window.scrollTo({top:0,behavior:"smooth"}); };
+    const next = document.createElement("button"); next.className="primary";
+    next.textContent = cur.id==="welcome" ? "Get started →"
+                     : cur.id==="review" ? "Submit to attorney"
+                     : "Continue →";
+    next.onclick = ()=>{
+      if (cur.id==="review") toast("Submitted to attorney (mock)");
+      state.step = Math.min(steps.length-1, state.step+1);
+      save(); render(); window.scrollTo({top:0,behavior:"smooth"});
+    };
+    nav.append(back, next);
+    app.append(nav);
+  }
+
+  // progress
+  document.getElementById("progressLabel").textContent = `Step ${state.step+1} of ${steps.length}`;
+  document.getElementById("progressFill").style.width = (((state.step)/(steps.length-1))*100).toFixed(0)+"%";
+
+  // help link delegation
+  app.querySelectorAll("[data-help]").forEach(el=>el.addEventListener("click", e=>{
+    e.preventDefault(); openHelp(el.dataset.help);
+  }));
+  app.querySelectorAll("[data-rm]").forEach(el=>el.addEventListener("click", ()=>{
+    const [k,i] = el.dataset.rm.split(".");
+    state[k].splice(Number(i),1); save(); render();
+  }));
+  app.querySelectorAll("[data-goto]").forEach(el=>el.addEventListener("click", ()=>{
+    const target = el.dataset.goto;
+    const idx = buildSteps().findIndex(s=>s.id===target);
+    if (idx>=0){ state.step=idx; save(); render(); window.scrollTo({top:0,behavior:"smooth"}); }
+  }));
+  const reset = document.getElementById("resetBtn");
+  if (reset) reset.onclick = ()=>{ localStorage.removeItem(STORAGE_KEY); location.reload(); };
+}
+
+/* ---------- help drawer ---------- */
+const HELP = {
+  community: { title:"Texas community property", body:`<p>Texas is one of nine community-property states. In general, anything you or your spouse acquired during the marriage is owned 50/50, regardless of whose name is on it. Property owned before the marriage, or received as a gift or inheritance, is usually separate property.</p><div class="ex"><b>Why it matters:</b> you can only give away your half of community property in your will. Your spouse already owns the other half.</div>` },
+  perstirpes: { title:"Per stirpes", body:`<p><i>Per stirpes</i> means "by branch." If a beneficiary dies before you, their share passes to their descendants, not to your other beneficiaries.</p><div class="ex"><b>Example:</b> you leave your estate to your two children equally. One child has already passed away but had two kids of their own. Per stirpes, those two grandchildren split that 50% share (25% each), and your surviving child still gets 50%.</div>` },
+  executor: { title:"What does an executor do?", body:`<p>The executor is the person who carries out your will. Their job:</p><ul><li>File the will with the probate court</li><li>Inventory your assets and debts</li><li>Pay any final bills and taxes</li><li>Distribute what remains to your beneficiaries</li></ul><p>It usually takes 6–12 months. You should pick someone organized, trustworthy, and willing to serve. They don't have to be a lawyer or financial expert.</p>` }
+};
+function openHelp(key){
+  const h = HELP[key]; if(!h) return;
+  document.getElementById("drawerTitle").textContent = h.title;
+  document.getElementById("drawerBody").innerHTML = h.body;
+  document.getElementById("drawer").classList.add("show");
+  document.getElementById("drawerMask").classList.add("show");
+}
+function closeHelp(){
+  document.getElementById("drawer").classList.remove("show");
+  document.getElementById("drawerMask").classList.remove("show");
+}
+document.getElementById("drawerClose").onclick = closeHelp;
+document.getElementById("drawerMask").onclick = closeHelp;
+
+render();
+</script>
+</body>
+</html>
